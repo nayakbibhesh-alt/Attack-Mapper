@@ -1,0 +1,940 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AttackMapper</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Newsreader:ital,wght@0,400;0,500;0,600;1,400;1,500&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --ink-900:#0A1018; --ink-850:#0D1520; --ink-800:#111C2B; --ink-750:#152337;
+    --line-700:#22344A; --line-600:#2C4260;
+    --text-hi:#EEF2F6; --text-mid:#AEBACB; --text-dim:#6E7E93;
+    --teal:#4FD1B3; --teal-dim:#255A4E; --teal-bg:#0F2620;
+    --copper:#E2923A; --copper-dim:#5A3D1E; --copper-bg:#26190C;
+    --crimson:#E2564A; --crimson-bg:#2A1512;
+    --gold:#D9B368; --gold-bg:#241D0F;
+    --radius:3px;
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{background:var(--ink-900);color:var(--text-hi);font-family:'JetBrains Mono',monospace;font-size:13px;line-height:1.5;min-height:100vh;}
+  h1,h2,h3,.voice{font-family:'Newsreader',serif;font-weight:500;letter-spacing:0.1px;}
+  .voice-italic{font-style:italic;font-weight:400;}
+  a{color:var(--teal);}
+  button{font-family:inherit;}
+  ::selection{background:var(--teal-dim);color:var(--text-hi);}
+
+  .shell{display:flex;min-height:100vh;}
+  .rail{width:210px;flex:none;background:var(--ink-850);border-right:1px solid var(--line-700);display:flex;flex-direction:column;padding:18px 0;}
+  .brand{padding:0 18px 18px 18px;border-bottom:1px solid var(--line-700);margin-bottom:10px;}
+  .brand-mark{display:flex;align-items:center;gap:8px;font-family:'Newsreader',serif;font-weight:600;font-size:19px;color:var(--text-hi);}
+  .brand-sub{margin-top:6px;font-size:10.5px;color:var(--text-dim);letter-spacing:0.3px;}
+  nav{display:flex;flex-direction:column;gap:1px;padding:6px 8px;}
+  .nav-item{display:flex;align-items:center;gap:10px;padding:9px 10px;border-radius:var(--radius);color:var(--text-mid);cursor:pointer;font-size:12.5px;border:1px solid transparent;background:transparent;text-align:left;width:100%;}
+  .nav-item:hover{background:var(--ink-800);color:var(--text-hi);}
+  .nav-item.active{background:var(--ink-750);border-color:var(--line-600);color:var(--text-hi);}
+  .nav-dot{width:6px;height:6px;border-radius:50%;background:var(--line-600);flex:none;}
+  .nav-item.active .nav-dot{background:var(--teal);}
+  .rail-footer{margin-top:auto;padding:14px 18px 4px 18px;border-top:1px solid var(--line-700);font-size:10.5px;color:var(--text-dim);}
+  .scope-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border:1px solid var(--teal-dim);background:var(--teal-bg);color:var(--teal);border-radius:20px;font-size:10.5px;margin-top:8px;}
+  .scope-chip .pulse{width:5px;height:5px;border-radius:50%;background:var(--teal);}
+  .conn-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:20px;font-size:10.5px;margin-top:6px;}
+  .conn-chip.up{border:1px solid var(--teal-dim);background:var(--teal-bg);color:var(--teal);}
+  .conn-chip.down{border:1px solid #5C2521;background:var(--crimson-bg);color:var(--crimson);}
+
+  .main{flex:1;min-width:0;display:flex;flex-direction:column;}
+  .topbar{display:flex;align-items:center;justify-content:space-between;gap:20px;padding:14px 28px;border-bottom:1px solid var(--line-700);background:var(--ink-900);}
+  .topbar h1{font-size:20px;margin:0;color:var(--text-hi);}
+  .topbar .path{font-size:11px;color:var(--text-dim);margin-top:3px;}
+  .conf-control{display:flex;align-items:center;gap:10px;}
+  .conf-control label{font-size:10.5px;color:var(--text-dim);white-space:nowrap;}
+  input[type=range]{-webkit-appearance:none;width:130px;height:2px;background:var(--line-600);border-radius:2px;outline:none;}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--teal);cursor:pointer;border:2px solid var(--ink-900);}
+  .conf-readout{font-size:12px;color:var(--teal);min-width:34px;text-align:right;}
+  .view{padding:26px 28px 60px 28px;flex:1;overflow-y:auto;}
+
+  section.block{margin-bottom:30px;}
+  .block-head{display:flex;align-items:baseline;justify-content:space-between;margin-bottom:12px;flex-wrap:wrap;gap:8px;}
+  .block-head h2{font-size:16px;color:var(--text-hi);margin:0;}
+  .block-head .hint{font-size:11px;color:var(--text-dim);}
+
+  .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;}
+  .stat{background:var(--ink-800);border:1px solid var(--line-700);padding:14px 16px;border-radius:var(--radius);}
+  .stat .num{font-family:'Newsreader',serif;font-size:26px;color:var(--text-hi);}
+  .stat .label{font-size:10.5px;color:var(--text-dim);margin-top:4px;}
+  .stat.warn .num{color:var(--copper);}
+  .stat.ok .num{color:var(--teal);}
+
+  .principles{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0;border:1px solid var(--line-700);border-radius:var(--radius);overflow:hidden;}
+  .principle{padding:14px 16px;border-right:1px solid var(--line-700);border-bottom:1px solid var(--line-700);background:var(--ink-800);}
+  .principle:last-child{border-right:none;}
+  .principle .k{font-size:10.5px;color:var(--copper);margin-bottom:5px;}
+  .principle .v{font-size:11.5px;color:var(--text-mid);line-height:1.55;}
+
+  .graph-wrap{background:var(--ink-800);border:1px solid var(--line-700);border-radius:var(--radius);padding:8px;position:relative;overflow-x:auto;}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;font-size:10.5px;color:var(--text-dim);margin-top:10px;padding:0 4px;}
+  .legend span{display:inline-flex;align-items:center;gap:6px;}
+  .legend .sw{width:16px;height:0;border-top:2px solid;}
+  .legend .swdash{border-top-style:dashed;}
+  .legend .dot{width:9px;height:9px;border-radius:2px;display:inline-block;}
+  svg text{font-family:'JetBrains Mono',monospace;}
+
+  table{width:100%;border-collapse:collapse;font-size:12px;}
+  th{text-align:left;font-weight:500;color:var(--text-dim);font-size:10px;letter-spacing:0.3px;padding:8px 10px;border-bottom:1px solid var(--line-700);}
+  td{padding:8px 10px;border-bottom:1px solid var(--ink-750);vertical-align:top;color:var(--text-mid);}
+  tr:hover td{background:var(--ink-800);}
+  .tbl-wrap{border:1px solid var(--line-700);border-radius:var(--radius);overflow:hidden;}
+  .mono-strong{color:var(--text-hi);}
+  .ev{color:var(--text-dim);font-size:11px;font-style:italic;font-family:'Newsreader',serif;}
+
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:2px 8px;border-radius:20px;font-size:10.5px;border:1px solid;}
+  .badge.confirmed{color:var(--teal);border-color:var(--teal-dim);background:var(--teal-bg);}
+  .badge.proposed{color:var(--copper);border-color:var(--copper-dim);background:var(--copper-bg);}
+  .sev{padding:2px 7px;border-radius:2px;font-size:10.5px;border:1px solid;}
+  .sev-critical{color:var(--crimson);border-color:#5C2521;background:var(--crimson-bg);}
+  .sev-high{color:var(--copper);border-color:var(--copper-dim);background:var(--copper-bg);}
+  .sev-medium{color:var(--gold);border-color:#4A3A1C;background:var(--gold-bg);}
+  .sev-low{color:var(--text-mid);border-color:var(--line-600);background:var(--ink-750);}
+
+  .btn{background:transparent;border:1px solid var(--line-600);color:var(--text-hi);padding:7px 13px;border-radius:var(--radius);font-size:11.5px;cursor:pointer;}
+  .btn:hover{background:var(--ink-750);border-color:var(--text-dim);}
+  .btn:disabled{opacity:0.5;cursor:default;}
+  .btn-primary{border-color:var(--teal-dim);color:var(--teal);background:var(--teal-bg);}
+  .btn-primary:hover{border-color:var(--teal);}
+  .btn-sm{padding:3px 9px;font-size:10.5px;}
+  select,input[type=text],input[type=number],textarea{background:var(--ink-800);border:1px solid var(--line-600);color:var(--text-hi);padding:8px 10px;border-radius:var(--radius);font-family:inherit;font-size:12px;}
+  select:focus,input:focus,textarea:focus{outline:none;border-color:var(--teal-dim);}
+  textarea{width:100%;resize:vertical;min-height:70px;}
+
+  .filter-row{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap;align-items:center;}
+  .chip-toggle{padding:6px 12px;border:1px solid var(--line-600);border-radius:20px;font-size:11px;color:var(--text-mid);cursor:pointer;background:transparent;}
+  .chip-toggle.active{border-color:var(--teal-dim);color:var(--teal);background:var(--teal-bg);}
+
+  .path-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;margin-bottom:18px;}
+  .field{display:flex;flex-direction:column;gap:5px;}
+  .field label{font-size:10px;color:var(--text-dim);}
+  .path-card{border:1px solid var(--line-700);border-radius:var(--radius);background:var(--ink-800);padding:14px 16px;margin-bottom:12px;}
+  .path-card .rank{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;flex-wrap:wrap;gap:8px;}
+  .path-card .rank .num{font-family:'Newsreader',serif;font-size:15px;color:var(--text-hi);}
+  .conf-pill{font-size:11px;padding:3px 9px;border-radius:20px;border:1px solid;}
+  .chain{font-size:12px;color:var(--text-mid);line-height:2.1;word-break:break-word;}
+  .chain .hop{color:var(--text-hi);}
+  .chain .rel{color:var(--teal);}
+  .chain .rel-unc{color:var(--copper);border-bottom:1px dashed var(--copper);}
+  .warn-line{margin-top:10px;padding:8px 10px;border-left:2px solid var(--copper);background:var(--copper-bg);font-size:11px;color:var(--text-mid);}
+  .warn-line .ev{display:block;margin-top:3px;}
+
+  .narration{margin-top:16px;border:1px solid var(--line-600);border-radius:var(--radius);background:var(--ink-750);padding:18px 20px;}
+  .narration .tag{font-size:10px;color:var(--copper);letter-spacing:0.3px;margin-bottom:8px;}
+  .narration p.summary{font-family:'Newsreader',serif;font-size:15px;line-height:1.7;color:var(--text-hi);margin:0 0 14px 0;}
+  .narration .weakest{font-size:12px;color:var(--text-mid);margin-bottom:12px;padding:8px 10px;background:var(--ink-800);border-radius:var(--radius);}
+  .narration .weakest b{color:var(--copper);font-weight:500;}
+  .remlist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px;}
+  .remlist li{display:flex;gap:10px;font-size:12px;color:var(--text-mid);}
+  .remlist .rn{flex:none;width:18px;height:18px;border-radius:50%;background:var(--ink-800);border:1px solid var(--line-600);display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--text-hi);}
+
+  .empty{padding:30px 20px;text-align:center;color:var(--text-dim);font-size:12px;border:1px dashed var(--line-700);border-radius:var(--radius);}
+  .loading{padding:20px;color:var(--text-dim);font-size:11.5px;}
+  .error-banner{padding:12px 14px;border:1px solid #5C2521;background:var(--crimson-bg);color:#F0A79E;border-radius:var(--radius);font-size:11.5px;margin-bottom:14px;line-height:1.6;}
+  .error-banner code{color:var(--text-hi);}
+
+  .ask-box{display:flex;gap:8px;margin-bottom:14px;}
+  .ask-box input{flex:1;}
+  .examples{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:20px;}
+  .example-chip{font-size:11px;color:var(--text-dim);border:1px solid var(--line-700);padding:5px 10px;border-radius:20px;cursor:pointer;background:transparent;}
+  .example-chip:hover{border-color:var(--teal-dim);color:var(--teal);}
+  .answer-card{border:1px solid var(--line-600);border-radius:var(--radius);background:var(--ink-750);padding:18px 20px;margin-bottom:14px;}
+  .answer-card .q{font-size:11px;color:var(--text-dim);margin-bottom:10px;}
+  .answer-card .q b{color:var(--text-hi);font-weight:500;}
+
+  .iter{border:1px solid var(--line-700);border-radius:var(--radius);background:var(--ink-800);margin-bottom:10px;}
+  .iter-head{display:flex;justify-content:space-between;padding:10px 14px;border-bottom:1px solid var(--line-700);font-size:11.5px;color:var(--text-mid);}
+  .iter-body{padding:12px 14px;display:flex;flex-direction:column;gap:10px;}
+  .action-row{display:flex;gap:10px;align-items:flex-start;font-size:11.5px;}
+  .action-status{flex:none;font-size:10px;padding:2px 7px;border-radius:2px;border:1px solid;margin-top:1px;}
+  .action-status.ran{color:var(--teal);border-color:var(--teal-dim);background:var(--teal-bg);}
+  .action-status.skip{color:var(--text-dim);border-color:var(--line-600);background:var(--ink-750);}
+  .action-detail .t{color:var(--text-hi);}
+  .action-detail .r{color:var(--text-dim);margin-top:2px;}
+  .action-detail .res{color:var(--text-mid);margin-top:2px;}
+  .scope-banner{display:flex;align-items:center;gap:10px;padding:12px 16px;border:1px solid var(--teal-dim);background:var(--teal-bg);border-radius:var(--radius);margin-bottom:16px;font-size:11.5px;color:var(--teal);}
+  .review-queue{border:1px solid var(--copper-dim);background:var(--copper-bg);border-radius:var(--radius);padding:14px 16px;margin-top:16px;}
+  .review-queue h3{margin:0 0 10px 0;font-size:13px;color:var(--copper);}
+  .inline-form{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-end;}
+
+  ::-webkit-scrollbar{width:9px;height:9px;}
+  ::-webkit-scrollbar-track{background:var(--ink-900);}
+  ::-webkit-scrollbar-thumb{background:var(--line-600);border-radius:5px;}
+
+  @media (max-width:820px){
+    .rail{width:60px;}
+    .brand-sub,.nav-item span.label,.rail-footer{display:none;}
+    .nav-item{justify-content:center;}
+    .topbar{flex-direction:column;align-items:flex-start;gap:10px;}
+  }
+</style>
+</head>
+<body>
+
+<div class="shell">
+  <aside class="rail">
+    <div class="brand">
+      <div class="brand-mark">
+        <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 2L3 6v6c0 5.2 3.6 9.7 9 11 5.4-1.3 9-5.8 9-11V6l-9-4z" stroke="#4FD1B3" stroke-width="1.4"/><path d="M8 12.5l2.5 2.5L16 9.5" stroke="#4FD1B3" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        AttackMapper
+      </div>
+      <div class="brand-sub">continuous attack-surface reasoning</div>
+      <div class="scope-chip"><span class="pulse"></span>read-only · authorized scope</div>
+      <div id="conn-status" class="conn-chip up">connecting…</div>
+    </div>
+    <nav id="nav"></nav>
+    <div class="rail-footer" id="rail-footer">loading inventory…</div>
+  </aside>
+
+  <main class="main">
+    <div class="topbar">
+      <div>
+        <h1 id="view-title">Overview</h1>
+        <div class="path" id="view-path">attackmapper / overview</div>
+      </div>
+      <div class="conf-control">
+        <label>min confidence</label>
+        <input type="range" id="global-conf" min="0" max="100" value="100">
+        <div class="conf-readout" id="global-conf-out">1.00</div>
+      </div>
+    </div>
+    <div class="view" id="view-root"><div class="loading">loading…</div></div>
+  </main>
+</div>
+
+<script>
+/* =====================================================================
+   API client — every call here hits the real Python backend
+   ===================================================================== */
+const API = {
+  async get(path){
+    const res = await fetch(path);
+    const body = await res.json().catch(()=>({}));
+    if(!res.ok) throw Object.assign(new Error(body.error||res.statusText), {status:res.status, body});
+    return body;
+  },
+  async post(path, data){
+    const res = await fetch(path, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(data||{})});
+    const body = await res.json().catch(()=>({}));
+    if(!res.ok) throw Object.assign(new Error(body.error||res.statusText), {status:res.status, body});
+    return body;
+  },
+  state: ()=>API.get("/api/state"),
+  graph: (minConf)=>API.get(`/api/graph?min_confidence=${minConf}`),
+  relationships: (filter)=>API.get(`/api/relationships?filter=${filter}`),
+  confirm: (id)=>API.post(`/api/relationships/${id}/confirm`, {}),
+  hosts: ()=>API.get("/api/hosts"),
+  services: (hostId)=>API.get(`/api/services${hostId?`?host_id=${hostId}`:""}`),
+  findings: ()=>API.get("/api/findings"),
+  analyze: (start,target,minConf,narrate)=>API.post("/api/analyze", {start,target,min_confidence:minConf,narrate}),
+  ask: (question,minConf)=>API.post("/api/ask", {question, min_confidence:minConf}),
+  infer: (compare)=>API.post("/api/infer", {compare}),
+  interpretEvidence: (host_id,evidence_type,text)=>API.post("/api/interpret-evidence", {host_id,evidence_type,text}),
+  scanNmap: (target,ports)=>API.post("/api/scan-nmap", {target,ports}),
+  discover: (scope,max_iterations,max_actions,review_threshold)=>API.post("/api/discover", {scope,max_iterations,max_actions,review_threshold}),
+  seedDemo: ()=>API.post("/api/seed-demo", {}),
+  reset: ()=>API.post("/api/reset", {confirm:true}),
+};
+
+function errorBanner(err){
+  const status = err.status;
+  let hint = "";
+  if(status === 424){
+    hint = "This calls a model via OpenRouter. Set <code>OPENROUTER_API_KEY</code> in the environment the server was started in, then restart <code>attackmapper serve</code>.";
+  } else if(status === 400 && err.body && err.body.known_nodes){
+    hint = `Known nodes: ${err.body.known_nodes.join(", ")}`;
+  }
+  return `<div class="error-banner">${escapeHtml(err.message)}${hint?`<br>${hint}`:""}</div>`;
+}
+
+function escapeHtml(s){
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+
+/* =====================================================================
+   App state
+   ===================================================================== */
+const state = {
+  view: "overview",
+  minConfidence: 1.0,
+  nodes: [],
+  overviewGraph: null,
+  cache: {},
+};
+
+const VIEWS = [
+  {id:"overview", label:"Overview", icon:"grid"},
+  {id:"graph", label:"Attack graph", icon:"graph"},
+  {id:"paths", label:"Attack paths", icon:"route"},
+  {id:"inventory", label:"Hosts & findings", icon:"list"},
+  {id:"relationships", label:"Relationships", icon:"link"},
+  {id:"ask", label:"Ask AttackMapper", icon:"chat"},
+  {id:"discovery", label:"Discovery loop", icon:"scan"},
+];
+
+function iconSvg(name){
+  const paths = {
+    grid: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
+    graph: '<circle cx="5" cy="6" r="2.2"/><circle cx="19" cy="6" r="2.2"/><circle cx="12" cy="18" r="2.2"/><path d="M7 7l10 0M6.5 8l4.5 8M17.5 8L13 16"/>',
+    route: '<circle cx="5" cy="19" r="2"/><circle cx="19" cy="5" r="2"/><path d="M5 17c0-6 2-8 8-8s6-2 6-2"/>',
+    list: '<path d="M8 6h13M8 12h13M8 18h13"/><circle cx="3.5" cy="6" r="1.2"/><circle cx="3.5" cy="12" r="1.2"/><circle cx="3.5" cy="18" r="1.2"/>',
+    link: '<path d="M9 15l6-6"/><path d="M7 12l-2 2a3.5 3.5 0 0 0 5 5l2-2"/><path d="M17 12l2-2a3.5 3.5 0 0 0-5-5l-2 2"/>',
+    chat: '<path d="M4 5h16v11H8l-4 4V5z"/>',
+    scan: '<path d="M4 8V5a1 1 0 0 1 1-1h3M20 8V5a1 1 0 0 0-1-1h-3M4 16v3a1 1 0 0 0 1 1h3M20 16v3a1 1 0 0 1-1 1h-3"/><circle cx="12" cy="12" r="3"/>',
+  };
+  return `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name]||""}</svg>`;
+}
+
+function renderNav(){
+  const nav = document.getElementById("nav");
+  nav.innerHTML = VIEWS.map(v => `
+    <button class="nav-item ${state.view===v.id?'active':''}" data-view="${v.id}">
+      <span class="nav-dot"></span>${iconSvg(v.icon)}<span class="label">${v.label}</span>
+    </button>`).join("");
+  nav.querySelectorAll(".nav-item").forEach(btn=>{
+    btn.addEventListener("click", ()=>{ state.view = btn.dataset.view; loadView(); });
+  });
+}
+
+function setTop(title, path){
+  document.getElementById("view-title").textContent = title;
+  document.getElementById("view-path").textContent = "attackmapper / " + path;
+}
+
+function fmtConf(c){ return Number(c).toFixed(2); }
+
+/* =====================================================================
+   Dynamic graph layout — layered left-to-right by longest path from
+   sources, so the map still lays out sensibly as scans add real hosts.
+   ===================================================================== */
+function layoutGraph(nodes, edges){
+  const ids = nodes.map(n=>n.id);
+  const layer = {}; ids.forEach(id=>layer[id]=0);
+  for(let pass=0; pass<ids.length+1; pass++){
+    let changed = false;
+    edges.forEach(e=>{
+      if(!(e.source in layer) || !(e.target in layer)) return;
+      if(layer[e.target] < layer[e.source]+1){ layer[e.target] = layer[e.source]+1; changed = true; }
+    });
+    if(!changed) break;
+  }
+  const groups = {};
+  ids.forEach(id=>{ (groups[layer[id]] ||= []).push(id); });
+  const layerKeys = Object.keys(groups).map(Number).sort((a,b)=>a-b);
+  const colGap = 175, rowGap = 78, xOffset = 90, yOffset = 55;
+  const positions = {};
+  let maxRows = 1;
+  layerKeys.forEach((lk, ci)=>{
+    groups[lk].forEach((id, ri)=>{
+      positions[id] = {x: xOffset + ci*colGap, y: yOffset + ri*rowGap};
+    });
+    maxRows = Math.max(maxRows, groups[lk].length);
+  });
+  const width = xOffset + Math.max(1,layerKeys.length)*colGap + 30;
+  const height = yOffset + maxRows*rowGap + 30;
+  return {positions, width, height};
+}
+
+const TYPE_COLOR = {external:"#7F8FA6", host:"#4FD1B3", account:"#D9B368", asset:"#E2564A"};
+
+function wrapLabel(label, maxLen){
+  const words = String(label).split(" ");
+  const lines = []; let cur = "";
+  for(const w of words){
+    if((cur+" "+w).trim().length > maxLen){ lines.push(cur.trim()); cur = w; }
+    else cur = (cur+" "+w).trim();
+  }
+  if(cur) lines.push(cur);
+  return lines.slice(0,2);
+}
+
+function renderGraphSvg(nodes, edges, minHeight){
+  const {positions, width, height} = layoutGraph(nodes, edges);
+  const h = Math.max(minHeight||220, height);
+
+  const edgesSvg = edges.map(e=>{
+    const s = positions[e.source], t = positions[e.target];
+    if(!s || !t) return "";
+    const confirmed = e.confirmed;
+    const color = confirmed ? "#4FD1B3" : "#E2923A";
+    const dash = confirmed ? "" : 'stroke-dasharray="5,4"';
+    const dx = t.x - s.x, dy = t.y - s.y;
+    const len = Math.hypot(dx,dy) || 1;
+    const ux = dx/len, uy = dy/len;
+    const x1 = s.x + ux*48, y1 = s.y + uy*48;
+    const x2 = t.x - ux*48, y2 = t.y - uy*48;
+    const mx = (x1+x2)/2, my = (y1+y2)/2;
+    return `
+      <line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${color}" stroke-width="1.4" ${dash} marker-end="url(#arrow-${confirmed?'c':'u'})"/>
+      <rect x="${mx-36}" y="${my-19}" width="72" height="15" fill="#0D1520" stroke="${color}" stroke-width="0.6" rx="2"/>
+      <text x="${mx}" y="${my-8}" text-anchor="middle" font-size="8" fill="${color}">${escapeHtml(e.relationship)}</text>
+    `;
+  }).join("");
+
+  const nodesSvg = nodes.map(n=>{
+    const p = positions[n.id];
+    if(!p) return "";
+    const color = TYPE_COLOR[n.type] || "#AEBACB";
+    const lines = wrapLabel(n.label||n.id, 15);
+    return `
+      <g class="node-card">
+        <rect x="${p.x-46}" y="${p.y-24}" width="92" height="48" rx="3" fill="#111C2B" stroke="${color}" stroke-width="1.3"/>
+        <text x="${p.x}" y="${p.y-6}" text-anchor="middle" font-size="9.5" fill="${color}" font-weight="600">${escapeHtml(n.id)}</text>
+        ${lines.map((line,i)=>`<text x="${p.x}" y="${p.y+8+i*10}" text-anchor="middle" font-size="8" fill="#AEBACB">${escapeHtml(line)}</text>`).join("")}
+      </g>`;
+  }).join("");
+
+  return `
+  <svg viewBox="0 0 ${width} ${h}" width="100%" height="${h}" style="display:block;min-width:${width}px;">
+    <defs>
+      <marker id="arrow-c" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#4FD1B3"/></marker>
+      <marker id="arrow-u" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#E2923A"/></marker>
+    </defs>
+    ${edgesSvg}${nodesSvg}
+  </svg>
+  <div class="legend">
+    <span><span class="dot" style="background:${TYPE_COLOR.external}"></span>external</span>
+    <span><span class="dot" style="background:${TYPE_COLOR.host}"></span>host</span>
+    <span><span class="dot" style="background:${TYPE_COLOR.account}"></span>account</span>
+    <span><span class="dot" style="background:${TYPE_COLOR.asset}"></span>asset</span>
+    <span><span class="sw" style="border-color:#4FD1B3"></span>confirmed edge</span>
+    <span><span class="sw swdash" style="border-color:#E2923A"></span>proposed (unconfirmed) edge</span>
+  </div>`;
+}
+
+function chainHtml(hops){
+  if(!hops.length) return "";
+  let out = `<span class="hop">${escapeHtml(hops[0].source)}</span>`;
+  hops.forEach(e=>{
+    if(e.confirmed){
+      out += ` &nbsp;&mdash;<span class="rel">${escapeHtml(e.relationship)}</span>&rarr;&nbsp; `;
+    } else {
+      out += ` &nbsp;&#8967;<span class="rel-unc">${escapeHtml(e.relationship)} (${fmtConf(e.confidence)})</span>&#8967;&nbsp; `;
+    }
+    out += `<span class="hop">${escapeHtml(e.target)}</span>`;
+  });
+  return out;
+}
+
+function narrationHtml(n){
+  return `
+    <div class="narration">
+      <div class="tag">layer 7 &middot; risk narration &amp; remediation (advisory only, never auto-applied)</div>
+      <p class="summary">${escapeHtml(n.summary)}</p>
+      <div class="weakest">weakest link &mdash; <b>${escapeHtml(n.weakest_link)}</b></div>
+      <ul class="remlist">${n.remediations.map(r=>`<li><span class="rn">${r.priority}</span><span>${escapeHtml(r.suggestion)}</span></li>`).join("")}</ul>
+    </div>`;
+}
+
+/* =====================================================================
+   Views — each is async, fetches real data, renders, then binds events
+   ===================================================================== */
+
+async function loadView(){
+  renderNav();
+  const root = document.getElementById("view-root");
+  root.innerHTML = `<div class="loading">loading…</div>`;
+  try{
+    if(state.view==="overview") await renderOverview(root);
+    else if(state.view==="graph") await renderGraphView(root);
+    else if(state.view==="paths") await renderPathsView(root);
+    else if(state.view==="inventory") await renderInventoryView(root);
+    else if(state.view==="relationships") await renderRelationshipsView(root);
+    else if(state.view==="ask") await renderAskView(root);
+    else if(state.view==="discovery") await renderDiscoveryView(root);
+  } catch(err){
+    root.innerHTML = errorBanner(err);
+  }
+}
+
+async function refreshFooter(){
+  try{
+    const s = await API.state();
+    state.nodes = s.nodes;
+    document.getElementById("rail-footer").innerHTML =
+      `${s.nodes.length} nodes &middot; ${s.relationships.length} relationships<br>${s.hosts.length} hosts &middot; ${s.findings.length} findings`;
+    document.getElementById("conn-status").className = "conn-chip up";
+    document.getElementById("conn-status").textContent = "connected";
+  } catch(err){
+    document.getElementById("conn-status").className = "conn-chip down";
+    document.getElementById("conn-status").textContent = "backend unreachable";
+  }
+}
+
+async function renderOverview(root){
+  setTop("Overview", "overview");
+  const [s, g] = await Promise.all([API.state(), API.graph(state.minConfidence)]);
+  const confirmedCount = s.relationships.filter(r=>r.confirmed).length;
+  const proposedCount = s.relationships.length - confirmedCount;
+  const sevCounts = {critical:0, high:0, medium:0, low:0};
+  s.findings.forEach(f=>{ sevCounts[f.severity] = (sevCounts[f.severity]||0)+1; });
+
+  const onboarding = (s.hosts.length === 0 && s.relationships.length === 0) ? `
+    <section class="block" id="onboarding-panel">
+      <div class="block-head"><h2>Get started</h2></div>
+      <p style="font-size:14px;color:var(--text-mid);max-width:640px;line-height:1.7;margin:0 0 14px;">
+        Nothing scanned yet. Point AttackMapper at a target you're authorized to test &mdash;
+        it stores everything in <code>${escapeHtml(s.backend||"the active store")}</code>, so
+        it'll still be here next time you open this UI.
+      </p>
+      <div class="inline-form">
+        <button class="btn btn-primary" id="ob-go-scan">Go scan a target</button>
+        <button class="btn" id="ob-load-demo">Load demo network instead</button>
+      </div>
+    </section>` : "";
+
+  root.innerHTML = `
+    ${onboarding}
+    <section class="block">
+      <div class="stats">
+        <div class="stat"><div class="num">${s.hosts.length}</div><div class="label">hosts discovered</div></div>
+        <div class="stat"><div class="num">${s.services.length}</div><div class="label">services observed</div></div>
+        <div class="stat warn"><div class="num">${sevCounts.critical+sevCounts.high}</div><div class="label">high / critical findings</div></div>
+        <div class="stat ok"><div class="num">${confirmedCount}</div><div class="label">confirmed relationships</div></div>
+        <div class="stat warn"><div class="num">${proposedCount}</div><div class="label">unconfirmed (llm-proposed)</div></div>
+      </div>
+    </section>
+    <section class="block">
+      <div class="block-head"><h2>Vision</h2></div>
+      <p class="voice voice-italic" style="font-size:14.5px;color:var(--text-mid);max-width:640px;line-height:1.75;">
+        AttackMapper watches the authorized environment, works out how what it finds can be
+        abused to reach other things on it, and produces ranked attack paths from an entry
+        point to a high-value target &mdash; in plain English, with evidence, not just a graph.
+        A deterministic graph engine does the traversal math; an LLM only does the
+        reasoning-under-ambiguity work of turning messy evidence into relationships and
+        graph output back into English.
+      </p>
+    </section>
+    <section class="block">
+      <div class="block-head"><h2>Non-negotiable principles</h2></div>
+      <div class="principles">
+        <div class="principle"><div class="k">contracts, not implementations</div><div class="v">Every layer promises a fixed shape of data upward. Internals can be rewritten freely as long as the shape at the boundary holds.</div></div>
+        <div class="principle"><div class="k">llms propose, the graph disposes</div><div class="v">Path-finding is always deterministic. LLM-proposed edges are stored with confirmed=false and a confidence score, never as fact.</div></div>
+        <div class="principle"><div class="k">discovery is read-only</div><div class="v">Nothing here modifies the environment it scans. Remediation is advisory text for a human to act on, never auto-applied.</div></div>
+        <div class="principle"><div class="k">structured llm output only</div><div class="v">Every LLM call returns JSON matching a fixed schema, validated before use. Malformed output is logged and skipped.</div></div>
+        <div class="principle"><div class="k">scope discipline</div><div class="v">Discovery is scoped strictly to environments you own or are explicitly authorized to test &mdash; a hard boundary, not a setting.</div></div>
+      </div>
+    </section>
+    <section class="block">
+      <div class="block-head"><h2>Attack surface, at a glance</h2><span class="hint">min confidence ${fmtConf(state.minConfidence)}</span></div>
+      <div class="graph-wrap">${renderGraphSvg(g.nodes, g.edges, 240)}</div>
+    </section>`;
+  refreshFooter();
+
+  const goScanBtn = document.getElementById("ob-go-scan");
+  if(goScanBtn) goScanBtn.addEventListener("click", ()=>{ state.view = "inventory"; renderNav(); loadView(); });
+  const loadDemoBtn = document.getElementById("ob-load-demo");
+  if(loadDemoBtn) loadDemoBtn.addEventListener("click", async ()=>{
+    loadDemoBtn.disabled = true;
+    loadDemoBtn.textContent = "loading…";
+    try{ await API.seedDemo(); await renderOverview(root); }
+    catch(err){ loadDemoBtn.disabled = false; loadDemoBtn.textContent = "Load demo network instead"; alert(err.message); }
+  });
+}
+
+async function renderGraphView(root){
+  setTop("Attack graph", "graph");
+  const g = await API.graph(state.minConfidence);
+  root.innerHTML = `
+    <section class="block">
+      <div class="block-head"><h2>Node &amp; relationship map</h2><span class="hint">${g.nodes.length} nodes &middot; ${g.edges.length} edges at &ge; ${fmtConf(state.minConfidence)} confidence</span></div>
+      <div class="graph-wrap">${renderGraphSvg(g.nodes, g.edges, 280)}</div>
+    </section>
+    <section class="block">
+      <div class="block-head"><h2>What this shows</h2></div>
+      <p style="color:var(--text-mid);font-size:12px;max-width:620px;line-height:1.7;">
+        Solid teal edges are confirmed &mdash; verified deterministically or by a human.
+        Dashed copper edges are hypotheses an LLM proposed from findings in storage; they
+        carry a confidence score and stay visually distinct until someone confirms them.
+        Lower the confidence slider in the top bar to bring proposed edges into the graph.
+        Layout updates automatically as new hosts and relationships enter storage.
+      </p>
+    </section>`;
+}
+
+async function renderPathsView(root){
+  setTop("Attack paths", "paths");
+  const s = await API.state();
+  const nodeOptions = s.nodes.map(n=>`<option value="${n.id}">${n.id} &mdash; ${escapeHtml(n.label)}</option>`).join("");
+
+  root.innerHTML = `
+    <section class="block">
+      <div class="block-head"><h2>Find and rank paths</h2><span class="hint">deterministic DFS &middot; ranked by path confidence (product of edge confidences)</span></div>
+      <div class="path-form">
+        <div class="field"><label>start node</label><select id="path-start">${nodeOptions}</select></div>
+        <div class="field"><label>target node</label><select id="path-target">${nodeOptions}</select></div>
+        <div class="field"><label id="path-conf-label">min confidence &middot; ${fmtConf(state.minConfidence)}</label>
+          <input type="range" id="path-conf" min="0" max="100" value="${state.minConfidence*100}"></div>
+        <button class="btn btn-primary" id="run-analyze">find paths</button>
+      </div>
+    </section>
+    <section class="block" id="path-results"><div class="empty">Choose a start and target node, then run "find paths".</div></section>`;
+
+  const startSel = document.getElementById("path-start");
+  const targetSel = document.getElementById("path-target");
+  if(s.nodes.find(n=>n.id==="external")) startSel.value = "external";
+  const jewel = s.nodes.find(n=>n.type==="asset") || s.nodes[s.nodes.length-1];
+  if(jewel) targetSel.value = jewel.id;
+
+  document.getElementById("path-conf").addEventListener("input", e=>{
+    document.getElementById("path-conf-label").textContent = `min confidence · ${fmtConf(e.target.value/100)}`;
+  });
+
+  document.getElementById("run-analyze").addEventListener("click", async ()=>{
+    const start = startSel.value, target = targetSel.value;
+    const minConf = Number(document.getElementById("path-conf").value)/100;
+    const resultsEl = document.getElementById("path-results");
+    resultsEl.innerHTML = `<div class="loading">analyzing…</div>`;
+    try{
+      const result = await API.analyze(start, target, minConf, false);
+      renderPathResults(resultsEl, result, start, target, minConf);
+    } catch(err){
+      resultsEl.innerHTML = errorBanner(err);
+    }
+  });
+}
+
+function renderPathResults(el, result, start, target, minConf){
+  if(!result.paths.length){
+    el.innerHTML = `<div class="empty">No path found from <b style="color:var(--text-hi)">${start}</b> to <b style="color:var(--text-hi)">${target}</b> at min confidence ${fmtConf(minConf)}.
+      ${minConf>=1.0 ? '<br><br>Try lowering min confidence to include unconfirmed, LLM-proposed edges.' : ''}</div>`;
+    return;
+  }
+  el.innerHTML = result.paths.map((path, i)=>{
+    const conf = path.confidence;
+    const confColor = conf>=0.95 ? "var(--teal)" : conf>=0.6 ? "var(--gold)" : "var(--copper)";
+    const unconfirmed = path.hops.filter(e=>!e.confirmed);
+    return `
+      <div class="path-card" data-path-index="${i}">
+        <div class="rank">
+          <span class="num">path ${i+1}</span>
+          <span class="conf-pill" style="color:${confColor};border-color:${confColor}55;">confidence ${conf.toFixed(2)} &middot; ${path.hops.length} hop(s)</span>
+        </div>
+        <div class="chain">${chainHtml(path.hops)}</div>
+        ${unconfirmed.length ? `
+          <div class="warn-line">includes ${unconfirmed.length} unconfirmed edge(s):
+            ${unconfirmed.map(e=>`<span class="ev">&ldquo;${escapeHtml(e.evidence)}&rdquo; &mdash; proposed_by=${e.proposed_by}, confidence=${fmtConf(e.confidence)}</span>`).join("")}
+          </div>` : ""}
+        <div class="narration-slot" style="margin-top:12px;">
+          <button class="btn btn-sm" data-narrate="${i}">narrate this path (layer 7)</button>
+        </div>
+      </div>`;
+  }).join("");
+
+  el.querySelectorAll("[data-narrate]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      const idx = Number(btn.dataset.narrate);
+      const slot = btn.closest(".narration-slot");
+      slot.innerHTML = `<div class="loading">calling layer 7…</div>`;
+      try{
+        const withNarration = await API.analyze(start, target, minConf, true);
+        const path = withNarration.paths[idx];
+        if(withNarration.narration_error){
+          slot.innerHTML = errorBanner({message: withNarration.narration_error, status:424});
+        } else if(path && withNarration.narration){
+          slot.innerHTML = narrationHtml(withNarration.narration);
+        } else {
+          slot.innerHTML = `<div class="empty">no narration returned for this path.</div>`;
+        }
+      } catch(err){
+        slot.innerHTML = errorBanner(err);
+      }
+    });
+  });
+}
+
+async function renderInventoryView(root){
+  setTop("Hosts & findings", "hosts-and-findings");
+  const [hosts, findings] = await Promise.all([API.hosts(), API.findings()]);
+
+  const hostsRows = await Promise.all(hosts.hosts.map(async h=>{
+    const svcRes = await API.services(h.id);
+    const svcs = svcRes.services.map(s=>`${s.port}/${s.protocol} ${s.service_name}`).join(", ") || "&mdash;";
+    return `<tr><td class="mono-strong">${h.id}</td><td>${h.ip}</td><td>${h.hostname}</td><td>${h.os||'&mdash;'}</td><td>${svcs}</td></tr>`;
+  }));
+
+  const findingsRows = findings.findings.map(f=>`
+    <tr>
+      <td><span class="sev sev-${f.severity}">${f.severity}</span></td>
+      <td class="mono-strong">${f.type}</td>
+      <td>${f.host_id}</td>
+      <td>${escapeHtml(f.description)}</td>
+      <td>${f.source} &middot; ${fmtConf(f.confidence)}</td>
+    </tr>
+    <tr><td></td><td colspan="4" class="ev">&ldquo;${escapeHtml(f.evidence)}&rdquo;</td></tr>`).join("");
+
+  root.innerHTML = `
+    <section class="block">
+      <div class="block-head"><h2>Hosts</h2><span class="hint">${hosts.hosts.length} discovered</span> <button class="btn" id="reset-store-btn" style="margin-left:auto;">reset store&hellip;</button></div>
+      <div class="tbl-wrap"><table><thead><tr><th>id</th><th>ip</th><th>hostname</th><th>os</th><th>services</th></tr></thead>
+      <tbody>${hostsRows.join("") || `<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:20px;">no hosts yet — run a scan below</td></tr>`}</tbody></table></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Scan a target (layer 1, real nmap)</h2><span class="hint">read-only, requires nmap installed on the server</span></div>
+      <div class="inline-form">
+        <div class="field"><label>target (ip or hostname)</label><input type="text" id="scan-target" placeholder="10.0.2.10"></div>
+        <div class="field"><label>ports</label><input type="text" id="scan-ports" value="1-1024" style="width:120px;"></div>
+        <button class="btn btn-primary" id="run-scan">scan</button>
+      </div>
+      <div id="scan-result" style="margin-top:10px;"></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Findings</h2><span class="hint">${findings.findings.length} recorded &middot; scanner + llm-interpreted evidence</span></div>
+      <div class="tbl-wrap"><table><thead><tr><th>severity</th><th>type</th><th>host</th><th>description</th><th>source / confidence</th></tr></thead>
+      <tbody>${findingsRows || `<tr><td colspan="5" style="text-align:center;color:var(--text-dim);padding:20px;">no findings yet</td></tr>`}</tbody></table></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Interpret ambiguous evidence (layer 1, llm)</h2><span class="hint">for banners/responses too unfamiliar for the rigid parsers &middot; requires OPENROUTER_API_KEY</span></div>
+      <div class="inline-form" style="align-items:flex-start;flex-wrap:wrap;">
+        <div class="field"><label>host id</label><input type="text" id="ev-host" placeholder="host-2" style="width:110px;"></div>
+        <div class="field"><label>evidence type</label><input type="text" id="ev-type" placeholder="http_response" style="width:150px;"></div>
+        <div class="field" style="flex:1;min-width:240px;"><label>raw evidence text</label><textarea id="ev-text" placeholder="paste the banner, response body, or config snippet"></textarea></div>
+        <button class="btn btn-primary" id="run-interpret">interpret</button>
+      </div>
+      <div id="interpret-result" style="margin-top:10px;"></div>
+    </section>`;
+
+  document.getElementById("reset-store-btn").addEventListener("click", async ()=>{
+    if(!confirm("This clears every host, service, finding, and relationship from the store. This cannot be undone. Continue?")) return;
+    try{ await API.reset(); await loadView(); }
+    catch(err){ alert(err.message); }
+  });
+
+  document.getElementById("run-scan").addEventListener("click", async ()=>{
+    const target = document.getElementById("scan-target").value.trim();
+    const ports = document.getElementById("scan-ports").value.trim() || "1-1024";
+    const out = document.getElementById("scan-result");
+    if(!target){ out.innerHTML = errorBanner({message:"enter a target first"}); return; }
+    out.innerHTML = `<div class="loading">scanning ${escapeHtml(target)}…</div>`;
+    try{
+      const summary = await API.scanNmap(target, ports);
+      out.innerHTML = `<div class="badge confirmed">scanned</div> &nbsp; ${summary.hosts} host(s), ${summary.services} service(s), ${summary.findings} finding(s) stored.`
+        + ` <span class="hint">Next: head to <b>Relationships</b> and click "infer from findings" to have the LLM propose how these hosts/services/findings connect.</span>`;
+      refreshFooter();
+    } catch(err){ out.innerHTML = errorBanner(err); }
+  });
+
+  document.getElementById("run-interpret").addEventListener("click", async ()=>{
+    const host_id = document.getElementById("ev-host").value.trim();
+    const evidence_type = document.getElementById("ev-type").value.trim();
+    const text = document.getElementById("ev-text").value.trim();
+    const out = document.getElementById("interpret-result");
+    if(!host_id || !evidence_type || !text){ out.innerHTML = errorBanner({message:"host id, evidence type, and evidence text are all required"}); return; }
+    out.innerHTML = `<div class="loading">calling layer 1's llm interpreter…</div>`;
+    try{
+      const summary = await API.interpretEvidence(host_id, evidence_type, text);
+      out.innerHTML = `${summary.findings} finding(s) stored (source=llm_inferred).`;
+      refreshFooter();
+    } catch(err){ out.innerHTML = errorBanner(err); }
+  });
+}
+
+async function renderRelationshipsView(root, filter){
+  filter = filter || "all";
+  setTop("Relationships", "relationships");
+  const [rels, all] = await Promise.all([API.relationships(filter), API.relationships("all")]);
+  const confirmedCount = all.relationships.filter(r=>r.confirmed).length;
+  const unconfirmedCount = all.relationships.length - confirmedCount;
+
+  const rows = rels.relationships.map(e=>`
+    <tr>
+      <td class="mono-strong">${e.id}</td>
+      <td>${e.source} &rarr; ${e.target}</td>
+      <td>${e.relationship}</td>
+      <td>${fmtConf(e.confidence)}</td>
+      <td>${e.confirmed ? `<span class="badge confirmed">confirmed</span>` : `<span class="badge proposed">proposed &middot; ${e.proposed_by}</span>`}</td>
+      <td>${e.confirmed ? "&mdash;" : `<button class="btn btn-sm" data-confirm="${e.id}">confirm</button>`}</td>
+    </tr>
+    <tr><td></td><td colspan="5" class="ev">&ldquo;${escapeHtml(e.evidence)}&rdquo;</td></tr>`).join("");
+
+  root.innerHTML = `
+    <section class="block">
+      <div class="block-head"><h2>All relationships</h2><span class="hint">confirming promotes confidence to 1.00, exactly like <code>attackmapper confirm &lt;id&gt;</code></span></div>
+      <div class="filter-row">
+        <button class="chip-toggle ${filter==='all'?'active':''}" data-filter="all">all (${all.relationships.length})</button>
+        <button class="chip-toggle ${filter==='confirmed'?'active':''}" data-filter="confirmed">confirmed (${confirmedCount})</button>
+        <button class="chip-toggle ${filter==='unconfirmed'?'active':''}" data-filter="unconfirmed">unconfirmed (${unconfirmedCount})</button>
+      </div>
+      <div class="tbl-wrap"><table><thead><tr><th>id</th><th>edge</th><th>relationship</th><th>confidence</th><th>status</th><th></th></tr></thead>
+      <tbody>${rows || `<tr><td colspan="6" style="text-align:center;color:var(--text-dim);padding:20px;">nothing matches this filter</td></tr>`}</tbody></table></div>
+    </section>
+
+    <section class="block">
+      <div class="block-head"><h2>Propose new relationships (layer 2, llm)</h2><span class="hint">reads findings + open services currently in storage &middot; requires OPENROUTER_API_KEY</span></div>
+      <div class="inline-form">
+        <button class="btn btn-primary" id="run-infer">infer from findings</button>
+        <label style="display:flex;align-items:center;gap:6px;font-size:11.5px;color:var(--text-dim);"><input type="checkbox" id="infer-compare"> compare against confirmed relationships</label>
+      </div>
+      <div id="infer-result" style="margin-top:10px;"></div>
+    </section>`;
+
+  document.querySelectorAll("[data-filter]").forEach(btn=>{
+    btn.addEventListener("click", ()=>renderRelationshipsView(root, btn.dataset.filter));
+  });
+  document.querySelectorAll("[data-confirm]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      btn.disabled = true;
+      try{ await API.confirm(btn.dataset.confirm); await renderRelationshipsView(root, filter); refreshFooter(); }
+      catch(err){ alert(err.message); btn.disabled = false; }
+    });
+  });
+  document.getElementById("run-infer").addEventListener("click", async ()=>{
+    const out = document.getElementById("infer-result");
+    const compare = document.getElementById("infer-compare").checked;
+    out.innerHTML = `<div class="loading">calling layer 2's llm inference…</div>`;
+    try{
+      const res = await API.infer(compare);
+      let html = `<div>${res.proposed.length} new relationship(s) proposed, stored as unconfirmed.</div>`;
+      if(res.comparison){
+        html += `<div style="margin-top:6px;">agrees: ${res.comparison.agrees.length} &middot; contradicts: ${res.comparison.contradicts.length} &middot; novel: ${res.comparison.novel.length}</div>`;
+      }
+      out.innerHTML = html;
+      renderRelationshipsView(root, filter);
+      refreshFooter();
+    } catch(err){ out.innerHTML = errorBanner(err); }
+  });
+}
+
+const ASK_EXAMPLES = [
+  "How could someone reach the customer database from the internet?",
+  "Can app01 reach db01 directly?",
+  "What's the weakest link between the internet and db01?",
+];
+
+async function renderAskView(root){
+  setTop("Ask AttackMapper", "ask");
+  root.innerHTML = `
+    <section class="block">
+      <div class="block-head"><h2>Ask an English question</h2><span class="hint">layer 8 &middot; translates to a path-finder call, requires OPENROUTER_API_KEY</span></div>
+      <div class="ask-box"><input type="text" id="ask-input" placeholder="how could someone reach the customer database from the internet?"><button class="btn btn-primary" id="ask-submit">ask</button></div>
+      <div class="examples">${ASK_EXAMPLES.map(q=>`<button class="example-chip" data-example="${q.replace(/"/g,'&quot;')}">${q}</button>`).join("")}</div>
+    </section>
+    <section class="block" id="ask-history"><div class="empty">Ask a question above, or try one of the examples.</div></section>`;
+
+  const historyEl = document.getElementById("ask-history");
+  const input = document.getElementById("ask-input");
+
+  async function ask(question){
+    if(!question) return;
+    historyEl.innerHTML = `<div class="loading">thinking…</div>` + historyEl.innerHTML.replace('<div class="empty">Ask a question above, or try one of the examples.</div>', "");
+    try{
+      const result = await API.ask(question, state.minConfidence);
+      const card = document.createElement("div");
+      card.className = "answer-card";
+      card.innerHTML = `<div class="q">you asked &mdash; <b>${escapeHtml(question)}</b></div>
+        <p style="font-family:'Newsreader',serif;font-size:14.5px;line-height:1.7;color:var(--text-hi);margin:0 0 10px 0;">${escapeHtml(result.answer)}</p>
+        ${result.intent==="find_path" && result.answered && result.paths_found ? `
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:10px;">resolved to: ${result.start} &rarr; ${result.target} &middot; ${result.paths_found} path(s) found</div>
+          ${result.narration ? narrationHtml(result.narration) : ""}` : ""}`;
+      historyEl.innerHTML = "";
+      historyEl.appendChild(card);
+    } catch(err){
+      historyEl.innerHTML = errorBanner(err);
+    }
+  }
+  document.getElementById("ask-submit").addEventListener("click", ()=>{ ask(input.value.trim()); input.value=""; });
+  input.addEventListener("keydown", e=>{ if(e.key==="Enter"){ ask(input.value.trim()); input.value=""; } });
+  document.querySelectorAll("[data-example]").forEach(chip=>{
+    chip.addEventListener("click", ()=>ask(chip.dataset.example));
+  });
+}
+
+async function renderDiscoveryView(root){
+  setTop("Discovery loop", "discovery-loop");
+  root.innerHTML = `
+    <section class="block">
+      <div class="block-head"><h2>Continuous / agentic discovery &mdash; phase G</h2><span class="hint">read-only, strictly scoped, nothing auto-confirmed &middot; requires OPENROUTER_API_KEY</span></div>
+      <div class="inline-form" style="align-items:flex-start;flex-wrap:wrap;">
+        <div class="field"><label>authorized scope (comma-separated ips / CIDRs)</label><input type="text" id="disc-scope" placeholder="10.0.1.10, 10.0.2.0/24" style="width:280px;"></div>
+        <div class="field"><label>max iterations</label><input type="number" id="disc-iter" value="5" style="width:80px;"></div>
+        <div class="field"><label>max actions / iteration</label><input type="number" id="disc-actions" value="3" style="width:80px;"></div>
+        <div class="field"><label>review threshold</label><input type="number" id="disc-threshold" value="0.75" step="0.05" min="0" max="1" style="width:80px;"></div>
+        <button class="btn btn-primary" id="run-discover">run loop</button>
+      </div>
+    </section>
+    <section class="block" id="discovery-results"><div class="empty">Set an authorized scope and run the loop. Nothing outside the scope you list is ever probed.</div></section>`;
+
+  document.getElementById("run-discover").addEventListener("click", async ()=>{
+    const scope = document.getElementById("disc-scope").value.trim();
+    const out = document.getElementById("discovery-results");
+    if(!scope){ out.innerHTML = errorBanner({message:"an authorized scope is required — this is a hard boundary, not optional"}); return; }
+    out.innerHTML = `<div class="loading">running discovery loop…</div>`;
+    try{
+      const result = await API.discover(
+        scope,
+        Number(document.getElementById("disc-iter").value)||5,
+        Number(document.getElementById("disc-actions").value)||3,
+        Number(document.getElementById("disc-threshold").value)||0.75
+      );
+      renderDiscoveryResult(out, result);
+      refreshFooter();
+    } catch(err){ out.innerHTML = errorBanner(err); }
+  });
+}
+
+function renderDiscoveryResult(out, result){
+  const iters = result.iterations.map(it=>{
+    if(it.stopped && !it.actions_taken.length){
+      return `<div class="iter"><div class="iter-head"><span>iteration ${it.iteration}</span><span>model proposed stopping</span></div>
+        <div class="iter-body"><div style="color:var(--text-dim);font-size:11.5px;">No further leads found within scope; loop ends here rather than probing speculatively.</div></div></div>`;
+    }
+    const actions = it.actions_taken.map(a=>`
+      <div class="action-row">
+        <span class="action-status ${a.executed?'ran':'skip'}">${a.executed?'ran':'skipped'}</span>
+        <div class="action-detail">
+          <div class="t">${a.action_type} &middot; target=${escapeHtml(a.target||"")}${a.reason?` (${escapeHtml(a.reason)})`:''}</div>
+          <div class="r">rationale: ${escapeHtml(a.rationale||"")}</div>
+          ${a.result ? `<div class="res">result: ${escapeHtml(JSON.stringify(a.result))}</div>` : ""}
+        </div>
+      </div>`).join("");
+    return `<div class="iter"><div class="iter-head"><span>iteration ${it.iteration}</span><span>${it.new_relationships_proposed ? `${it.new_relationships_proposed} new relationship proposal(s)` : 'no new proposals'}</span></div>
+      <div class="iter-body">${actions}</div></div>`;
+  }).join("");
+
+  out.innerHTML = `
+    <div class="scope-banner"><span class="pulse" style="width:6px;height:6px;border-radius:50%;background:var(--teal);"></span>
+      authorized scope: ${result.scope.join(", ")} &mdash; no target outside this list was ever probed, regardless of what the model proposed</div>
+    ${iters}
+    <div class="review-queue">
+      <h3>human review queue</h3>
+      <div style="font-size:11.5px;color:var(--text-mid);margin-bottom:10px;">${result.pending_review.length} unconfirmed relationship(s) at or above the review threshold are awaiting a human decision. Nothing here has been auto-confirmed.</div>
+      ${result.pending_review.map(r=>`
+        <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-top:1px solid var(--line-700);font-size:11.5px;flex-wrap:wrap;gap:8px;">
+          <span>${r.id} &middot; ${r.source} &rarr; ${r.target} (${r.relationship}) &middot; confidence ${fmtConf(r.confidence)}</span>
+          <button class="btn btn-sm" data-confirm-inline="${r.id}">confirm</button>
+        </div>`).join("")}
+    </div>`;
+
+  out.querySelectorAll("[data-confirm-inline]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      btn.disabled = true;
+      try{ await API.confirm(btn.dataset.confirmInline); btn.textContent = "confirmed"; refreshFooter(); }
+      catch(err){ alert(err.message); btn.disabled = false; }
+    });
+  });
+}
+
+/* =====================================================================
+   Boot
+   ===================================================================== */
+document.getElementById("global-conf").addEventListener("input", e=>{
+  state.minConfidence = Number(e.target.value)/100;
+  document.getElementById("global-conf-out").textContent = fmtConf(state.minConfidence);
+  if(state.view==="overview" || state.view==="graph") loadView();
+});
+
+refreshFooter();
+loadView();
+</script>
+</body>
+</html>

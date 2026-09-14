@@ -1,0 +1,11 @@
+# Phase A: none (stdlib only)
+# Phase B additions:
+requests>=2.31
+psycopg2-binary>=2.9
+# Phase C additions:
+# openai is used only as an OpenAI-compatible HTTP client for OpenRouter
+# (https://openrouter.ai/docs/community/openai-sdk) -- AttackMapper's LLM
+# layers do not call OpenAI's own API.
+openai>=1.0
+# dev/test only:
+pytest>=8.0

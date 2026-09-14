@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SYNTHETIC FIXTURE — hand-crafted for tests/test_parsers.py, not a
+     real scan. Modeled on genuine nmap -oX output structure (compare
+     nmap_localhost_scan.xml, which IS a real captured scan) to
+     exercise KNOWN_VULNERABLE_BANNERS matching on a banner that would
+     be irresponsible to actually stand up. -->
+<!DOCTYPE nmaprun>
+<nmaprun scanner="nmap" args="nmap -sT -sV -p 21,22 -oX - 10.0.9.50" start="1789298000" startstr="Sun Sep 13 09:00:00 2026" version="7.94SVN" xmloutputversion="1.05">
+<scaninfo type="connect" protocol="tcp" numservices="2" services="21,22"/>
+<host starttime="1789298000" endtime="1789298001">
+<status state="up" reason="syn-ack" reason_ttl="0"/>
+<address addr="10.0.9.50" addrtype="ipv4"/>
+<hostnames>
+<hostname name="legacy-ftp.lab.internal" type="PTR"/>
+</hostnames>
+<ports>
+<port protocol="tcp" portid="21">
+<state state="open" reason="syn-ack" reason_ttl="0"/>
+<service name="ftp" product="vsftpd" version="2.3.4" method="probed" conf="10"/>
+</port>
+<port protocol="tcp" portid="22">
+<state state="open" reason="syn-ack" reason_ttl="0"/>
+<service name="ssh" product="OpenSSH" version="4.3" extrainfo="protocol 2.0" method="probed" conf="10"/>
+</port>
+</ports>
+</host>
+<runstats><finished time="1789298001" timestr="Sun Sep 13 09:00:01 2026" summary="Nmap done" elapsed="0.9" exit="success"/><hosts up="1" down="0" total="1"/>
+</runstats>
+</nmaprun>
