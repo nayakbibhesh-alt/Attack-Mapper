@@ -98,6 +98,36 @@ def test_rejects_non_string_clarification():
     assert nl_interface.parse_intent_response(raw) is None
 
 
+def test_parses_well_formed_list_findings_response_with_target():
+    raw = json.dumps({"intent": "list_findings", "target": "web"})
+    result = nl_interface.parse_intent_response(raw)
+    assert result == {"intent": "list_findings", "start": None, "target": "web"}
+
+
+def test_parses_well_formed_list_findings_response_without_target():
+    raw = json.dumps({"intent": "list_findings", "target": None})
+    result = nl_interface.parse_intent_response(raw)
+    assert result == {"intent": "list_findings", "start": None, "target": None}
+
+
+def test_parses_list_findings_response_missing_target_key():
+    # "target" omitted entirely is the same as explicit null -- an
+    # environment-wide question.
+    raw = json.dumps({"intent": "list_findings"})
+    result = nl_interface.parse_intent_response(raw)
+    assert result == {"intent": "list_findings", "start": None, "target": None}
+
+
+def test_rejects_list_findings_with_empty_target():
+    raw = json.dumps({"intent": "list_findings", "target": "   "})
+    assert nl_interface.parse_intent_response(raw) is None
+
+
+def test_rejects_list_findings_with_non_string_target():
+    raw = json.dumps({"intent": "list_findings", "target": 42})
+    assert nl_interface.parse_intent_response(raw) is None
+
+
 # ---------------------------------------------------------------------
 # ask(): the full pipeline. Real storage + real AttackGraph, only the
 # two LLM calls (intent parsing, then Layer 7's narration) are mocked.
@@ -280,6 +310,120 @@ def test_ask_uses_caller_supplied_nodes_for_intent_resolution(demo_store, monkey
     # crashing on a node it doesn't recognize.
     assert result["answered"] is True
     assert result["paths_found"] == 0
+
+
+# ---------------------------------------------------------------------
+# ask(): the "list_findings" intent -- general vulnerability Q&A,
+# no path-finding involved. Layer 7 (risk_llm) must never be called
+# for this intent: it's a deterministic formatter over
+# storage.list_findings(), not a second inference step.
+# ---------------------------------------------------------------------
+
+
+def _list_findings_response(target=None):
+    return json.dumps({"intent": "list_findings", "target": target})
+
+
+def test_ask_lists_findings_for_a_specific_host(demo_store, monkeypatch):
+    storage.save_finding(
+        {
+            "host_id": "web",
+            "type": "missing_security_headers",
+            "severity": "medium",
+            "description": "Response is missing Content-Security-Policy",
+            "evidence": "HTTP GET /",
+        }
+    )
+    storage.save_finding(
+        {
+            "host_id": "db",
+            "type": "exposed_env_file",
+            "severity": "critical",
+            "description": "db exposes a .env file",
+            "evidence": "HTTP GET /.env",
+        }
+    )
+    monkeypatch.setattr(
+        nl_interface, "call_llm", lambda prompt: _list_findings_response(target="web")
+    )
+    narrate_called = []
+    monkeypatch.setattr(
+        risk_llm,
+        "call_llm",
+        lambda prompt: narrate_called.append(1) or _well_formed_narration(),
+    )
+
+    result = nl_interface.ask("what's wrong with web01?")
+
+    assert result["intent"] == "list_findings"
+    assert result["target"] == "web"
+    assert result["answered"] is True
+    assert len(result["findings"]) == 1
+    assert result["findings"][0]["host_id"] == "web"
+    assert "Content-Security-Policy" in result["answer"]
+    assert "exposed_env_file" not in result["answer"]  # scoped to web, not db
+    assert narrate_called == []  # Layer 7 never called for this intent
+
+
+def test_ask_lists_findings_across_environment_when_target_is_null(
+    demo_store, monkeypatch
+):
+    storage.save_finding(
+        {
+            "host_id": "web",
+            "type": "missing_security_headers",
+            "severity": "low",
+            "description": "no HSTS header",
+            "evidence": "HTTP GET /",
+        }
+    )
+    storage.save_finding(
+        {
+            "host_id": "db",
+            "type": "exposed_env_file",
+            "severity": "critical",
+            "description": "db exposes a .env file",
+            "evidence": "HTTP GET /.env",
+        }
+    )
+    monkeypatch.setattr(
+        nl_interface, "call_llm", lambda prompt: _list_findings_response(target=None)
+    )
+
+    result = nl_interface.ask("what are our worst vulnerabilities?")
+
+    assert result["target"] is None
+    assert result["answered"] is True
+    assert len(result["findings"]) == 2
+    # Sorted worst-first: critical before low.
+    assert result["findings"][0]["severity"] == "critical"
+    assert "exposed_env_file" in result["findings"][0]["type"]
+    assert "db" in result["answer"]  # host id shown when not scoped to one host
+
+
+def test_ask_list_findings_declines_unknown_target(demo_store, monkeypatch):
+    monkeypatch.setattr(
+        nl_interface,
+        "call_llm",
+        lambda prompt: _list_findings_response(target="not_a_real_node"),
+    )
+
+    result = nl_interface.ask("what's wrong with the thingamajig?")
+
+    assert result["answered"] is False
+    assert "not_a_real_node" in result["answer"]
+
+
+def test_ask_list_findings_with_no_findings_yet(demo_store, monkeypatch):
+    monkeypatch.setattr(
+        nl_interface, "call_llm", lambda prompt: _list_findings_response(target="web")
+    )
+
+    result = nl_interface.ask("what's wrong with web01?")
+
+    assert result["answered"] is True
+    assert result["findings"] == []
+    assert "No findings recorded" in result["answer"]
 
 
 def test_call_llm_raises_clear_error_without_api_key(monkeypatch):

@@ -58,7 +58,7 @@ def test_http_probe_returns_expected_shape():
     )
     with patch("requests.get", return_value=fake_resp) as mock_get:
         result = scanners.http_probe("http://10.0.0.5/debug")
-    mock_get.assert_called_once_with("http://10.0.0.5/debug", timeout=5.0)
+    mock_get.assert_called_once_with("http://10.0.0.5/debug", timeout=15.0)
     assert result == {
         "url": "http://10.0.0.5/debug",
         "status_code": 200,

@@ -60,6 +60,16 @@ def test_prompt_instructs_external_literal_for_internet():
     assert '"external"' in prompt
 
 
+def test_prompt_shows_list_findings_intent():
+    prompt = build_nl_query_prompt("test question", _sample_nodes())
+    assert '"list_findings"' in prompt
+
+
+def test_prompt_explains_list_findings_target_can_be_null():
+    prompt = build_nl_query_prompt("test question", _sample_nodes())
+    assert "null if it doesn't" in prompt
+
+
 def test_prompt_is_deterministic_given_same_inputs():
     nodes = _sample_nodes()
     first = build_nl_query_prompt("same question", nodes)

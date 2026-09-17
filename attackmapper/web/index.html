@@ -128,6 +128,29 @@
   .tabs-sub{display:flex;gap:6px;margin-bottom:18px;border-bottom:1px solid var(--border-soft);}
   .tab-sub{padding:9px 4px;margin-right:14px;font-size:13px;color:var(--text-mid);border-bottom:2px solid transparent;font-weight:500;}
   .tab-sub.active{color:var(--text);border-color:var(--accent);}
+
+  .graph-wrap{display:flex;gap:20px;align-items:flex-start;}
+  .graph-canvas-wrap{position:relative;flex:1;min-width:0;background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);overflow:hidden;}
+  .graph-svg{width:100%;height:560px;display:block;}
+  .graph-info{width:270px;flex:none;min-height:200px;align-self:stretch;}
+  .graph-legend{position:absolute;bottom:12px;left:12px;display:flex;flex-wrap:wrap;gap:8px 14px;font-size:10.5px;color:var(--text-mid);background:rgba(255,255,255,.88);padding:7px 10px;border-radius:var(--radius-sm);border:1px solid var(--border-soft);max-width:calc(100% - 24px);}
+  .legend-item{display:flex;align-items:center;gap:5px;white-space:nowrap;}
+  .legend-dot{width:8px;height:8px;border-radius:50%;display:inline-block;flex:none;}
+  .legend-line{width:16px;height:0;border-top:2px solid var(--text-mid);display:inline-block;}
+  .legend-line.dashed{border-top-style:dashed;border-top-color:var(--accent);}
+  .graph-node{cursor:pointer;}
+  .graph-node circle{stroke:#fff;stroke-width:2px;transition:opacity .15s;}
+  .graph-node text{font-size:11px;font-family:'Inter',sans-serif;fill:var(--text);pointer-events:none;transition:opacity .15s;}
+  .graph-node.dim circle,.graph-node.dim text{opacity:.22;}
+  .graph-edge{stroke:var(--text-mid);stroke-width:1.6px;fill:none;transition:opacity .15s;}
+  .graph-edge.unconfirmed{stroke:var(--accent);stroke-dasharray:5,4;}
+  .graph-edge.dim{opacity:.12;}
+  .graph-edge-label{font-size:9.5px;fill:var(--text-dim);transition:opacity .15s;}
+  .graph-edge-label.dim{opacity:.12;}
+  .graph-info h3{font-size:14px;}
+  .findings-mini .finding{padding:10px 12px;margin-bottom:6px;}
+  .findings-mini .finding-title{font-size:12.5px;}
+  .findings-mini .finding-desc{font-size:12px;}
 </style>
 </head>
 <body>
@@ -141,6 +164,7 @@
     <nav>
       <button class="nav-item active" data-tab="scan">Scan a target</button>
       <button class="nav-item" data-tab="inventory">Inventory</button>
+      <button class="nav-item" data-tab="graph">Graph</button>
       <button class="nav-item" data-tab="ask">Ask</button>
       <button class="nav-item" data-tab="advanced">Advanced</button>
     </nav>
@@ -200,15 +224,49 @@
       </section>
     </section>
 
+    <!-- ===================== GRAPH TAB ===================== -->
+    <section class="view wide" id="tab-graph" style="display:none;">
+      <div class="hero">
+        <h1>Graph</h1>
+        <p>Every node and relationship discovered so far, drawn as a diagram — the same graph <code>attackmapper analyze</code> and the Ask box query, laid out visually instead of as a text list.</p>
+      </div>
+
+      <div class="panel" style="padding:12px 18px;margin-bottom:16px;">
+        <div class="field-row" style="margin-bottom:0;">
+          <label><input type="checkbox" id="graphIncludeUnconfirmed"> include unconfirmed / proposed edges</label>
+          <button class="btn secondary small" id="graphRefresh">Refresh</button>
+          <span style="margin-left:auto;font-size:12px;color:var(--text-dim);" id="graphCounts"></span>
+        </div>
+      </div>
+
+      <div class="graph-wrap">
+        <div class="graph-canvas-wrap">
+          <svg id="graphSvg" class="graph-svg" viewBox="0 0 900 560" preserveAspectRatio="xMidYMid meet"></svg>
+          <div class="graph-legend">
+            <div class="legend-item"><span class="legend-dot" style="background:#6B6459"></span>external</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#C1622D"></span>host</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#96700A"></span>account</div>
+            <div class="legend-item"><span class="legend-dot" style="background:#B3261E"></span>asset</div>
+            <div class="legend-item"><span class="legend-line"></span>confirmed</div>
+            <div class="legend-item"><span class="legend-line dashed"></span>unconfirmed</div>
+          </div>
+        </div>
+        <div class="graph-info panel" id="graphInfo">
+          <div class="empty">Click a node to see its details and relationships.</div>
+        </div>
+      </div>
+    </section>
+
     <!-- ===================== ASK TAB ===================== -->
     <section class="view" id="tab-ask" style="display:none;">
-      <div class="hero"><h1>Ask</h1><p>Ask a plain-English question about the current graph (requires an LLM key configured on the server).</p></div>
+      <div class="hero"><h1>Ask</h1><p>Ask a plain-English question about the current graph or its vulnerabilities (requires an LLM key configured on the server).</p></div>
       <div class="panel">
         <div class="field-row">
-          <input type="text" id="askInput" placeholder="e.g. how could someone get from the internet to the database?" style="flex:1;min-width:280px;">
+          <input type="text" id="askInput" placeholder="e.g. how could someone reach the database, or what's wrong with web01?" style="flex:1;min-width:280px;">
           <button class="btn" id="askBtn">Ask</button>
         </div>
         <div class="ask-answer" id="askAnswer" style="display:none;"></div>
+        <div id="askFindings"></div>
       </div>
     </section>
 
@@ -272,10 +330,11 @@ $$('.nav-item').forEach(btn => btn.addEventListener('click', () => {
   $$('.nav-item').forEach(b => b.classList.remove('active'));
   btn.classList.add('active');
   const tab = btn.dataset.tab;
-  ['scan','inventory','ask','advanced'].forEach(t => {
+  ['scan','inventory','graph','ask','advanced'].forEach(t => {
     $('#tab-'+t).style.display = (t===tab) ? '' : 'none';
   });
   if (tab === 'inventory') loadInventory();
+  if (tab === 'graph') loadGraph();
 }));
 
 $$('.tab-sub').forEach(t => t.addEventListener('click', () => {
@@ -405,16 +464,180 @@ async function loadInventory() {
 }
 $('#refreshInventory').addEventListener('click', loadInventory);
 
+// ---------- graph ----------
+const NODE_COLOR = {external:'#6B6459', host:'#C1622D', account:'#96700A', asset:'#B3261E'};
+let graphState = {nodes: [], edges: [], pos: {}};
+
+// A minimal force-directed layout (Fruchterman-Reingold-style):
+// nodes repel each other, edges pull their endpoints together, run
+// for a fixed number of cooling iterations. Good enough for the
+// dozens-of-nodes graphs this tool deals with; no external library
+// needed for something this small.
+function forceLayout(nodes, edges, width, height) {
+  const pos = {};
+  const n = nodes.length || 1;
+  nodes.forEach((node, i) => {
+    const angle = (2 * Math.PI * i) / n;
+    const r = Math.min(width, height) * 0.32;
+    pos[node.id] = {x: width/2 + Math.cos(angle)*r, y: height/2 + Math.sin(angle)*r, vx: 0, vy: 0};
+  });
+  if (nodes.length <= 1) return pos;
+
+  const k = Math.sqrt((width * height) / nodes.length) * 0.9;
+  const iterations = 260;
+  for (let iter = 0; iter < iterations; iter++) {
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const a = pos[nodes[i].id], b = pos[nodes[j].id];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+        const force = (k*k) / dist;
+        dx /= dist; dy /= dist;
+        a.vx += dx*force; a.vy += dy*force;
+        b.vx -= dx*force; b.vy -= dy*force;
+      }
+    }
+    edges.forEach(e => {
+      const a = pos[e.source], b = pos[e.target];
+      if (!a || !b) return;
+      let dx = a.x - b.x, dy = a.y - b.y;
+      const dist = Math.sqrt(dx*dx + dy*dy) || 0.01;
+      const force = (dist*dist) / k;
+      dx /= dist; dy /= dist;
+      a.vx -= dx*force; a.vy -= dy*force;
+      b.vx += dx*force; b.vy += dy*force;
+    });
+    const temp = 0.2 * (1 - iter/iterations);
+    nodes.forEach(node => {
+      const p = pos[node.id];
+      const disp = Math.sqrt(p.vx*p.vx + p.vy*p.vy) || 0.01;
+      const capped = Math.min(disp, 60);
+      p.x += (p.vx/disp) * capped * temp;
+      p.y += (p.vy/disp) * capped * temp;
+      p.x += (width/2 - p.x) * 0.006;   // mild pull toward center
+      p.y += (height/2 - p.y) * 0.006;
+      p.x = Math.max(46, Math.min(width - 46, p.x));
+      p.y = Math.max(46, Math.min(height - 46, p.y));
+      p.vx = 0; p.vy = 0;
+    });
+  }
+  return pos;
+}
+
+function renderGraph(nodes, edges) {
+  const width = 900, height = 560;
+  const svg = $('#graphSvg');
+
+  if (!nodes.length) {
+    svg.innerHTML = '';
+    $('#graphInfo').innerHTML = '<div class="empty">Nothing discovered yet — run a scan or load the demo network from Advanced.</div>';
+    $('#graphCounts').textContent = '';
+    graphState = {nodes: [], edges: [], pos: {}};
+    return;
+  }
+
+  const pos = forceLayout(nodes, edges, width, height);
+  graphState = {nodes, edges, pos};
+
+  const defs = `<defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6B6459"></path>
+    </marker>
+    <marker id="arrow-unconfirmed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#C1622D"></path>
+    </marker>
+  </defs>`;
+
+  const edgeSvg = edges.map(e => {
+    const a = pos[e.source], b = pos[e.target];
+    if (!a || !b) return '';
+    const cls = e.confirmed ? 'graph-edge' : 'graph-edge unconfirmed';
+    const marker = e.confirmed ? 'url(#arrow)' : 'url(#arrow-unconfirmed)';
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const dist = Math.sqrt(dx*dx + dy*dy) || 1;
+    const pad = 20; // keep the arrowhead off the node circle
+    const x1 = a.x + (dx/dist)*pad, y1 = a.y + (dy/dist)*pad;
+    const x2 = b.x - (dx/dist)*pad, y2 = b.y - (dy/dist)*pad;
+    const midx = (x1 + x2) / 2, midy = (y1 + y2) / 2;
+    return `<g class="edge-group" data-source="${esc(e.source)}" data-target="${esc(e.target)}">
+      <line class="${cls}" x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" marker-end="${marker}"></line>
+      <text class="graph-edge-label" x="${midx.toFixed(1)}" y="${(midy-4).toFixed(1)}" text-anchor="middle">${esc(e.relationship)}</text>
+    </g>`;
+  }).join('');
+
+  const nodeSvg = nodes.map(node => {
+    const p = pos[node.id];
+    const color = NODE_COLOR[node.type] || '#928C7D';
+    const label = node.label ? node.label.split(' (')[0] : node.id;
+    return `<g class="graph-node" data-id="${esc(node.id)}" transform="translate(${p.x.toFixed(1)},${p.y.toFixed(1)})">
+      <circle r="16" fill="${color}"></circle>
+      <text y="30" text-anchor="middle">${esc(label)}</text>
+    </g>`;
+  }).join('');
+
+  svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  svg.innerHTML = defs + edgeSvg + nodeSvg;
+
+  $$('.graph-node', svg).forEach(g => g.addEventListener('click', () => selectGraphNode(g.dataset.id)));
+
+  $('#graphCounts').textContent = `${nodes.length} node(s), ${edges.length} edge(s)`;
+  $('#graphInfo').innerHTML = '<div class="empty">Click a node to see its details and relationships.</div>';
+}
+
+function selectGraphNode(id) {
+  const {nodes, edges} = graphState;
+  const node = nodes.find(n => n.id === id);
+  if (!node) return;
+
+  $$('.graph-node').forEach(g => g.classList.toggle('dim', g.dataset.id !== id));
+  $$('.edge-group').forEach(g => {
+    const connected = g.dataset.source === id || g.dataset.target === id;
+    g.querySelectorAll('.graph-edge, .graph-edge-label').forEach(el => el.classList.toggle('dim', !connected));
+  });
+
+  const outgoing = edges.filter(e => e.source === id);
+  const incoming = edges.filter(e => e.target === id);
+  const fmtEdge = e => `<div style="margin-bottom:4px;font-size:12.5px;">${e.confirmed ? '' : '<span style="color:var(--accent);">(unconfirmed) </span>'}${esc(e.relationship)} — <span class="mono">${esc(e.source === id ? e.target : e.source)}</span></div>`;
+
+  $('#graphInfo').innerHTML = `
+    <h3 style="margin-bottom:2px;">${esc(node.label || node.id)}</h3>
+    <div style="font-size:11.5px;color:var(--text-dim);margin-bottom:12px;">${esc(node.type)} &middot; <span class="mono">${esc(node.id)}</span></div>
+    ${outgoing.length ? `<div style="font-size:11.5px;color:var(--text-mid);font-weight:600;margin-bottom:6px;">Reaches</div>${outgoing.map(fmtEdge).join('')}` : ''}
+    ${incoming.length ? `<div style="font-size:11.5px;color:var(--text-mid);font-weight:600;margin:${outgoing.length ? '12px' : '0'} 0 6px;">Reached by</div>${incoming.map(fmtEdge).join('')}` : ''}
+    ${(!outgoing.length && !incoming.length) ? '<div class="empty" style="padding:12px;">No edges for this node yet.</div>' : ''}
+  `;
+}
+
+async function loadGraph() {
+  $('#graphCounts').textContent = 'Loading…';
+  try {
+    const minConfidence = $('#graphIncludeUnconfirmed').checked ? 0.0 : 1.0;
+    const result = await api('GET', `/api/graph?min_confidence=${minConfidence}`);
+    renderGraph(result.nodes || [], result.edges || []);
+  } catch (e) {
+    $('#graphSvg').innerHTML = '';
+    $('#graphCounts').textContent = '';
+    $('#graphInfo').innerHTML = `<div class="empty">Failed to load: ${esc(e.message)}</div>`;
+  }
+}
+$('#graphRefresh').addEventListener('click', loadGraph);
+$('#graphIncludeUnconfirmed').addEventListener('change', loadGraph);
+
 // ---------- ask ----------
 async function runAsk() {
   const question = $('#askInput').value.trim();
   if (!question) return;
   const box = $('#askAnswer');
+  const findingsBox = $('#askFindings');
   box.style.display = 'block';
   box.textContent = 'Thinking…';
+  findingsBox.innerHTML = '';
   try {
     const result = await api('POST', '/api/ask', {question});
     box.textContent = result.answer || JSON.stringify(result, null, 2);
+    if (result.intent === 'list_findings' && Array.isArray(result.findings) && result.findings.length) {
+      findingsBox.innerHTML = `<div class="findings-mini" style="margin-top:14px;">${renderFindings(result.findings)}</div>`;
+    }
   } catch (e) {
     box.textContent = 'Error: ' + e.message;
   }
