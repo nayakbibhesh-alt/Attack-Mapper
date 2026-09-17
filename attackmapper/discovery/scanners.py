@@ -62,7 +62,7 @@ def run_nmap_scan(target: str, ports: str = "1-1024", timeout: float = 120.0) ->
         raise RuntimeError(
             "nmap is not installed on this machine (try: apt-get install nmap)"
         )
-    cmd = ["nmap", "-sT", "-sV", "-p", ports, "-oX", "-", target]
+    cmd = ["nmap", "-sT", "-sV", "-Pn", "-p", ports, "-oX", "-", target]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False
