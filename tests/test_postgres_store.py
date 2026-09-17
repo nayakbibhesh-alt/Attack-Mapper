@@ -202,3 +202,91 @@ def test_data_persists_across_separate_store_instances(store):
     nodes, edges = store2.load_graph()
     assert {n.id for n in nodes} == {"external", host_id}
     assert len(edges) == 1
+
+
+# -- connection-handling regressions -----------------------------------
+#
+# These cover the failure mode that took the Render deployment down:
+# a pooled connection left in a bad state (or killed by Neon while
+# idle) poisoning every later request with
+# `psycopg2.InterfaceError: connection already closed` /
+# `InFailedSqlTransaction`.
+
+
+def test_failed_operation_leaves_store_usable(store):
+    """A deliberate KeyError must roll its transaction back, not leave
+    the session idle-in-transaction or in a failed state."""
+    with pytest.raises(KeyError):
+        store.save_service(
+            {"host_id": "does-not-exist", "port": 22, "protocol": "tcp",
+             "service_name": "ssh"}
+        )
+    # The very next call used to blow up; it must now just work.
+    host_id = store.save_host({"hostname": "web01", "ip": "10.0.1.10"})
+    assert store.list_hosts()[0]["id"] == host_id
+
+    with pytest.raises(KeyError):
+        store.confirm_relationship("rel-nope")
+    assert store.list_findings() == []
+
+
+def test_survives_a_connection_killed_underneath_it(store):
+    """Simulate Neon dropping the connection (autosuspend, idle
+    timeout, recycling): kill every pooled connection, then make a
+    normal request. The store should transparently reconnect."""
+    host_id = store.save_host({"hostname": "web01", "ip": "10.0.1.10"})
+
+    killed = []
+    for _ in range(4):
+        conn = store._pool.getconn()
+        conn.close()
+        killed.append(conn)
+    for conn in killed:
+        store._pool.putconn(conn)
+
+    assert store.list_hosts()[0]["id"] == host_id
+    store.save_finding(
+        {"host_id": host_id, "type": "open_port", "severity": "low",
+         "description": "d", "evidence": "e"}
+    )
+    assert len(store.list_findings()) == 1
+
+
+def test_concurrent_save_host_same_ip_does_not_collide(store):
+    """ThreadingHTTPServer can run two scans at once. Upserting on the
+    `ip` unique constraint keeps concurrent writers from minting two
+    ids for the same host and tripping a unique violation."""
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(
+            pool.map(
+                lambda i: store.save_host(
+                    {"hostname": f"web-{i}", "ip": "10.0.1.10"}
+                ),
+                range(8),
+            )
+        )
+
+    assert len(set(ids)) == 1
+    assert len(store.list_hosts()) == 1
+
+
+def test_concurrent_reads_and_writes(store):
+    """Independent connections per operation: parallel reads and
+    writes should all complete without stepping on each other."""
+    import concurrent.futures
+
+    host_id = store.save_host({"hostname": "web01", "ip": "10.0.1.10"})
+
+    def work(i):
+        store.save_finding(
+            {"host_id": host_id, "type": "open_port", "severity": "low",
+             "description": f"finding {i}", "evidence": "e"}
+        )
+        return len(store.list_findings())
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(work, range(16)))
+
+    assert len(store.list_findings()) == 16

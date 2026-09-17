@@ -52,6 +52,7 @@ No LLM calls happen anywhere in this file.
 
 from __future__ import annotations
 
+import contextlib
 import itertools
 import json
 import os
@@ -62,6 +63,7 @@ from typing import Protocol
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 from .models import Edge, Node
 
@@ -754,26 +756,137 @@ class PostgresStore:
     restart, redeploy, or a second instance would restart the counter
     at 1 and collide with rows an earlier process already committed.
     So ids here are `<prefix>-<uuid4 hex>` instead.
+
+    Connection handling (why this isn't one long-lived connection)
+    -------------------------------------------------------------
+    A managed Postgres like Neon will close a connection out from
+    under a long-running process for several ordinary reasons: compute
+    autosuspend after an idle period, `idle_in_transaction_session_
+    timeout`, connection recycling, or a brief control-plane blip. A
+    single `psycopg2.connect()` held for the life of the process
+    doesn't notice any of that; it just starts raising
+    `psycopg2.InterfaceError: connection already closed` on the next
+    request, forever, while the HTTP server itself stays happily up
+    (the UI keeps loading, every `/api/*` call 500s).
+
+    So connections come from a `ThreadedConnectionPool`, are checked
+    out per operation, validated before use, and returned afterwards.
+    A connection that errored is closed and dropped rather than
+    handed to the next request.
+
+    Every operation also runs inside an explicit transaction that is
+    always ended -- committed on success, rolled back on failure,
+    including the deliberate `KeyError` paths (`save_service` on an
+    unknown host, `confirm_relationship` on an unknown edge). The
+    previous code left those transactions open, which both pinned a
+    server-side transaction (making Neon's idle-in-transaction timeout
+    kill the connection) and left the session in a failed state where
+    every later statement raised `InFailedSqlTransaction`.
     """
 
-    def __init__(self, dsn: str, seed_demo_data: bool = False) -> None:
+    # Retried once, on a fresh connection, when raised before we've
+    # attempted a commit: these mean "this connection is gone", not
+    # "this query is wrong".
+    _CONNECTION_ERRORS = (psycopg2.InterfaceError, psycopg2.OperationalError)
+
+    def __init__(
+        self,
+        dsn: str,
+        seed_demo_data: bool = False,
+        minconn: int | None = None,
+        maxconn: int | None = None,
+    ) -> None:
         self.dsn = dsn
-        self._lock = threading.Lock()
-        self._conn = psycopg2.connect(dsn)
-        self._conn.autocommit = False
-        with self._lock:
-            self._create_schema()
-            self._ensure_structural_nodes()
+        if minconn is None:
+            minconn = int(os.environ.get("ATTACKMAPPER_PG_POOL_MIN", "1"))
+        if maxconn is None:
+            maxconn = int(os.environ.get("ATTACKMAPPER_PG_POOL_MAX", "8"))
+        # keepalives stop an idle connection from being silently
+        # dropped by anything between here and the database; the
+        # connect_timeout keeps a cold/suspended Neon compute from
+        # hanging a worker thread indefinitely.
+        self._pool = psycopg2.pool.ThreadedConnectionPool(
+            minconn,
+            maxconn,
+            dsn=dsn,
+            connect_timeout=int(os.environ.get("ATTACKMAPPER_PG_CONNECT_TIMEOUT", "10")),
+            keepalives=1,
+            keepalives_idle=30,
+            keepalives_interval=10,
+            keepalives_count=3,
+            application_name="attackmapper",
+        )
+        self._create_schema()
+        self._ensure_structural_nodes()
         if seed_demo_data:
             self.seed_demo_data()
 
     # -- internal helpers ------------------------------------------------
 
-    def _cursor(self):
-        return self._conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    def _acquire(self):
+        """Check out a connection that is known to be alive.
+
+        A pooled connection may have been killed while it sat idle, so
+        a checked-out connection is pinged once and replaced if the
+        ping fails. `putconn(close=True)` removes the dead one from
+        the pool instead of recycling it back in.
+        """
+        for _ in range(3):
+            conn = self._pool.getconn()
+            try:
+                if conn.closed:
+                    raise psycopg2.InterfaceError("pooled connection already closed")
+                conn.autocommit = False
+                with conn.cursor() as cur:
+                    cur.execute("SELECT 1")
+                conn.rollback()  # don't leave the ping's transaction open
+                return conn
+            except self._CONNECTION_ERRORS:
+                self._pool.putconn(conn, close=True)
+        # Pool is handing back nothing usable (database down, or every
+        # slot dead at once) -- let the caller's error surface.
+        conn = self._pool.getconn()
+        conn.autocommit = False
+        return conn
+
+    @contextlib.contextmanager
+    def _txn(self, write: bool = True):
+        """Run a block against a pooled connection inside one
+        transaction, ending it either way and returning the connection
+        to the pool.
+
+        `write=False` blocks still get a transaction (Postgres always
+        opens one) -- it's ended with a rollback rather than a commit,
+        which is what keeps read endpoints like `/api/state` from
+        leaving sessions idle-in-transaction.
+        """
+        conn = self._acquire()
+        discard = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.DictCursor) as cur:
+                yield cur
+            if write:
+                conn.commit()
+            else:
+                conn.rollback()
+        except BaseException:
+            discard = True
+            try:
+                conn.rollback()
+                discard = conn.closed != 0
+            except Exception:
+                discard = True
+            raise
+        finally:
+            self._pool.putconn(conn, close=discard or conn.closed != 0)
+
+    def closeall(self) -> None:
+        """Close every pooled connection. Not part of the `Backend`
+        protocol -- available for tests and for a clean shutdown path."""
+        self._pool.closeall()
 
     def _create_schema(self) -> None:
-        with self._cursor() as cur:
+        with self._txn() as cur:
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS nodes (
@@ -818,71 +931,62 @@ class PostgresStore:
                 );
                 """
             )
-        self._conn.commit()
 
     def _ensure_structural_nodes(self) -> None:
-        with self._cursor() as cur:
+        with self._txn() as cur:
             for n in _STRUCTURAL_NODES:
                 cur.execute(
                     "INSERT INTO nodes (id, type, label) VALUES (%s, %s, %s) "
                     "ON CONFLICT (id) DO NOTHING",
                     (n.id, n.type, n.label),
                 )
-        self._conn.commit()
 
     def _new_id(self, prefix: str) -> str:
         return f"{prefix}-{uuid.uuid4().hex[:12]}"
 
     def seed_demo_data(self) -> None:
-        with self._lock:
-            with self._cursor() as cur:
-                for n in DEMO_NODES:
-                    cur.execute(
-                        "INSERT INTO nodes (id, type, label) VALUES (%s, %s, %s) "
-                        "ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, "
-                        "label = EXCLUDED.label",
-                        (n.id, n.type, n.label),
-                    )
-                for e in DEMO_EDGES:
-                    cur.execute(
-                        "INSERT INTO edges (id, source, target, relationship, evidence, "
-                        "confirmed, confidence, proposed_by) "
-                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            self._new_id("rel"),
-                            e.source,
-                            e.target,
-                            e.relationship,
-                            e.evidence,
-                            e.confirmed,
-                            e.confidence,
-                            e.proposed_by,
-                        ),
-                    )
-            self._conn.commit()
+        with self._txn() as cur:
+            for n in DEMO_NODES:
+                cur.execute(
+                    "INSERT INTO nodes (id, type, label) VALUES (%s, %s, %s) "
+                    "ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, "
+                    "label = EXCLUDED.label",
+                    (n.id, n.type, n.label),
+                )
+            for e in DEMO_EDGES:
+                cur.execute(
+                    "INSERT INTO edges (id, source, target, relationship, evidence, "
+                    "confirmed, confidence, proposed_by) "
+                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        self._new_id("rel"),
+                        e.source,
+                        e.target,
+                        e.relationship,
+                        e.evidence,
+                        e.confirmed,
+                        e.confidence,
+                        e.proposed_by,
+                    ),
+                )
 
     def reset(self) -> None:
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute(
-                    "TRUNCATE nodes, edges, findings, hosts, services"
-                )
-            self._conn.commit()
-            self._ensure_structural_nodes()
+        with self._txn() as cur:
+            cur.execute("TRUNCATE nodes, edges, findings, hosts, services")
+        self._ensure_structural_nodes()
 
     # -- Backend protocol --------------------------------------------------
 
     def load_graph(self, min_confidence: float = 1.0) -> tuple[list[Node], list[Edge]]:
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute("SELECT id, type, label FROM nodes")
-                node_rows = cur.fetchall()
-                cur.execute(
-                    "SELECT source, target, relationship, evidence, confirmed, "
-                    "confidence, proposed_by FROM edges WHERE confidence >= %s",
-                    (min_confidence,),
-                )
-                edge_rows = cur.fetchall()
+        with self._txn(write=False) as cur:
+            cur.execute("SELECT id, type, label FROM nodes")
+            node_rows = cur.fetchall()
+            cur.execute(
+                "SELECT source, target, relationship, evidence, confirmed, "
+                "confidence, proposed_by FROM edges WHERE confidence >= %s",
+                (min_confidence,),
+            )
+            edge_rows = cur.fetchall()
         nodes = [Node(id=r["id"], type=r["type"], label=r["label"]) for r in node_rows]
         edges = [
             Edge(
@@ -903,79 +1007,74 @@ class PostgresStore:
         missing = required - finding.keys()
         if missing:
             raise ValueError(f"finding missing required fields: {missing}")
-        with self._lock:
-            finding_id = finding.get("id") or self._new_id("finding")
-            with self._cursor() as cur:
-                cur.execute(
-                    "INSERT INTO findings (id, host_id, type, severity, description, "
-                    "evidence, source, confidence) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET host_id = EXCLUDED.host_id, "
-                    "type = EXCLUDED.type, severity = EXCLUDED.severity, "
-                    "description = EXCLUDED.description, evidence = EXCLUDED.evidence, "
-                    "source = EXCLUDED.source, confidence = EXCLUDED.confidence",
-                    (
-                        finding_id,
-                        finding["host_id"],
-                        finding["type"],
-                        finding["severity"],
-                        finding["description"],
-                        finding["evidence"],
-                        finding.get("source", "scanner"),
-                        finding.get("confidence", 1.0),
-                    ),
-                )
-            self._conn.commit()
+        finding_id = finding.get("id") or self._new_id("finding")
+        with self._txn() as cur:
+            cur.execute(
+                "INSERT INTO findings (id, host_id, type, severity, description, "
+                "evidence, source, confidence) VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET host_id = EXCLUDED.host_id, "
+                "type = EXCLUDED.type, severity = EXCLUDED.severity, "
+                "description = EXCLUDED.description, evidence = EXCLUDED.evidence, "
+                "source = EXCLUDED.source, confidence = EXCLUDED.confidence",
+                (
+                    finding_id,
+                    finding["host_id"],
+                    finding["type"],
+                    finding["severity"],
+                    finding["description"],
+                    finding["evidence"],
+                    finding.get("source", "scanner"),
+                    finding.get("confidence", 1.0),
+                ),
+            )
 
     def save_relationship(self, edge: Edge) -> str:
-        with self._lock:
-            edge_id = self._new_id("rel")
-            with self._cursor() as cur:
-                cur.execute(
-                    "INSERT INTO edges (id, source, target, relationship, evidence, "
-                    "confirmed, confidence, proposed_by) "
-                    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                    (
-                        edge_id,
-                        edge.source,
-                        edge.target,
-                        edge.relationship,
-                        edge.evidence,
-                        edge.confirmed,
-                        edge.confidence,
-                        edge.proposed_by,
-                    ),
-                )
-            self._conn.commit()
+        edge_id = self._new_id("rel")
+        with self._txn() as cur:
+            cur.execute(
+                "INSERT INTO edges (id, source, target, relationship, evidence, "
+                "confirmed, confidence, proposed_by) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    edge_id,
+                    edge.source,
+                    edge.target,
+                    edge.relationship,
+                    edge.evidence,
+                    edge.confirmed,
+                    edge.confidence,
+                    edge.proposed_by,
+                ),
+            )
         return edge_id
 
     def confirm_relationship(self, edge_id: str) -> None:
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute("SELECT proposed_by FROM edges WHERE id = %s", (edge_id,))
-                row = cur.fetchone()
-                if row is None:
-                    raise KeyError(f"no relationship with id {edge_id!r}")
-                cur.execute(
-                    "UPDATE edges SET confirmed = TRUE, confidence = 1.0 WHERE id = %s",
-                    (edge_id,),
-                )
-            self._conn.commit()
+        with self._txn() as cur:
+            # UPDATE ... RETURNING does the existence check and the
+            # write in one statement, so the not-found case can't leave
+            # a half-open read transaction behind.
+            cur.execute(
+                "UPDATE edges SET confirmed = TRUE, confidence = 1.0 "
+                "WHERE id = %s RETURNING id",
+                (edge_id,),
+            )
+            if cur.fetchone() is None:
+                raise KeyError(f"no relationship with id {edge_id!r}")
 
     def list_relationships(self, confirmed: bool | None = None) -> list[dict]:
-        with self._lock:
-            with self._cursor() as cur:
-                if confirmed is None:
-                    cur.execute(
-                        "SELECT id, source, target, relationship, evidence, confirmed, "
-                        "confidence, proposed_by FROM edges"
-                    )
-                else:
-                    cur.execute(
-                        "SELECT id, source, target, relationship, evidence, confirmed, "
-                        "confidence, proposed_by FROM edges WHERE confirmed = %s",
-                        (confirmed,),
-                    )
-                rows = cur.fetchall()
+        with self._txn(write=False) as cur:
+            if confirmed is None:
+                cur.execute(
+                    "SELECT id, source, target, relationship, evidence, confirmed, "
+                    "confidence, proposed_by FROM edges"
+                )
+            else:
+                cur.execute(
+                    "SELECT id, source, target, relationship, evidence, confirmed, "
+                    "confidence, proposed_by FROM edges WHERE confirmed = %s",
+                    (confirmed,),
+                )
+            rows = cur.fetchall()
         return [
             {
                 "id": r["id"],
@@ -991,30 +1090,27 @@ class PostgresStore:
         ]
 
     def list_findings(self) -> list[dict]:
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute(
-                    "SELECT id, host_id, type, severity, description, evidence, "
-                    "source, confidence FROM findings"
-                )
-                rows = cur.fetchall()
+        with self._txn(write=False) as cur:
+            cur.execute(
+                "SELECT id, host_id, type, severity, description, evidence, "
+                "source, confidence FROM findings"
+            )
+            rows = cur.fetchall()
         return [dict(r) for r in rows]
 
     def delete_findings_for_host(self, host_id: str, source: str | None = None) -> int:
         """See InMemoryStore.delete_findings_for_host — same semantics,
         SQL-backed."""
-        with self._lock:
-            with self._cursor() as cur:
-                if source is None:
-                    cur.execute("DELETE FROM findings WHERE host_id = %s", (host_id,))
-                else:
-                    cur.execute(
-                        "DELETE FROM findings WHERE host_id = %s AND source = %s",
-                        (host_id, source),
-                    )
-                deleted = cur.rowcount
-            self._conn.commit()
-            return deleted
+        with self._txn() as cur:
+            if source is None:
+                cur.execute("DELETE FROM findings WHERE host_id = %s", (host_id,))
+            else:
+                cur.execute(
+                    "DELETE FROM findings WHERE host_id = %s AND source = %s",
+                    (host_id, source),
+                )
+            deleted = cur.rowcount
+        return deleted
 
     # -- Phase B: hosts/services (feed discovery output into the graph) --
 
@@ -1025,25 +1121,35 @@ class PostgresStore:
             raise ValueError(f"host missing required fields: {missing}")
 
         extra = {k: v for k, v in host.items() if k not in {"hostname", "ip", "os", "id"}}
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute("SELECT id FROM hosts WHERE ip = %s", (host["ip"],))
-                existing = cur.fetchone()
-                host_id = existing["id"] if existing else self._new_id("host")
-                cur.execute(
-                    "INSERT INTO hosts (id, hostname, ip, os, extra) "
-                    "VALUES (%s, %s, %s, %s, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET hostname = EXCLUDED.hostname, "
-                    "ip = EXCLUDED.ip, os = EXCLUDED.os, extra = EXCLUDED.extra",
-                    (host_id, host["hostname"], host["ip"], host.get("os"), json.dumps(extra)),
-                )
-                label = f"{host['hostname']} ({host['ip']})"
-                cur.execute(
-                    "INSERT INTO nodes (id, type, label) VALUES (%s, 'host', %s) "
-                    "ON CONFLICT (id) DO UPDATE SET type = 'host', label = EXCLUDED.label",
-                    (host_id, label),
-                )
-            self._conn.commit()
+        with self._txn() as cur:
+            # Upsert on `ip`, the column that actually carries the
+            # UNIQUE constraint, and take the id back with RETURNING.
+            # The old SELECT-then-INSERT-ON CONFLICT (id) version had a
+            # race under ThreadingHTTPServer: two concurrent scans of
+            # the same IP both saw no row, both minted a fresh id, and
+            # the second INSERT died on the ip unique constraint
+            # instead of updating the existing host.
+            cur.execute(
+                "INSERT INTO hosts (id, hostname, ip, os, extra) "
+                "VALUES (%s, %s, %s, %s, %s) "
+                "ON CONFLICT (ip) DO UPDATE SET hostname = EXCLUDED.hostname, "
+                "os = EXCLUDED.os, extra = EXCLUDED.extra "
+                "RETURNING id",
+                (
+                    self._new_id("host"),
+                    host["hostname"],
+                    host["ip"],
+                    host.get("os"),
+                    json.dumps(extra),
+                ),
+            )
+            host_id = cur.fetchone()["id"]
+            label = f"{host['hostname']} ({host['ip']})"
+            cur.execute(
+                "INSERT INTO nodes (id, type, label) VALUES (%s, 'host', %s) "
+                "ON CONFLICT (id) DO UPDATE SET type = 'host', label = EXCLUDED.label",
+                (host_id, label),
+            )
         return host_id
 
     def save_service(self, service: dict) -> None:
@@ -1056,32 +1162,30 @@ class PostgresStore:
             for k, v in service.items()
             if k not in {"host_id", "port", "protocol", "service_name", "id"}
         }
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute("SELECT 1 FROM hosts WHERE id = %s", (service["host_id"],))
-                host_exists = cur.fetchone()
-                if not host_exists:
-                    raise KeyError(f"no host with id {service['host_id']!r}")
-                service_id = self._new_id("svc")
-                cur.execute(
-                    "INSERT INTO services (id, host_id, port, protocol, service_name, extra) "
-                    "VALUES (%s, %s, %s, %s, %s, %s)",
-                    (
-                        service_id,
-                        service["host_id"],
-                        service["port"],
-                        service["protocol"],
-                        service["service_name"],
-                        json.dumps(extra),
-                    ),
-                )
-            self._conn.commit()
+        with self._txn() as cur:
+            cur.execute("SELECT 1 FROM hosts WHERE id = %s", (service["host_id"],))
+            if cur.fetchone() is None:
+                # _txn rolls this transaction back on the way out, so
+                # the connection goes back to the pool clean rather
+                # than idle-in-transaction.
+                raise KeyError(f"no host with id {service['host_id']!r}")
+            cur.execute(
+                "INSERT INTO services (id, host_id, port, protocol, service_name, extra) "
+                "VALUES (%s, %s, %s, %s, %s, %s)",
+                (
+                    self._new_id("svc"),
+                    service["host_id"],
+                    service["port"],
+                    service["protocol"],
+                    service["service_name"],
+                    json.dumps(extra),
+                ),
+            )
 
     def list_hosts(self) -> list[dict]:
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute("SELECT id, hostname, ip, os, extra FROM hosts")
-                rows = cur.fetchall()
+        with self._txn(write=False) as cur:
+            cur.execute("SELECT id, hostname, ip, os, extra FROM hosts")
+            rows = cur.fetchall()
         out = []
         for r in rows:
             record = {"id": r["id"], "hostname": r["hostname"], "ip": r["ip"], "os": r["os"]}
@@ -1090,19 +1194,18 @@ class PostgresStore:
         return out
 
     def list_services(self, host_id: str | None = None) -> list[dict]:
-        with self._lock:
-            with self._cursor() as cur:
-                if host_id is None:
-                    cur.execute(
-                        "SELECT id, host_id, port, protocol, service_name, extra FROM services"
-                    )
-                else:
-                    cur.execute(
-                        "SELECT id, host_id, port, protocol, service_name, extra "
-                        "FROM services WHERE host_id = %s",
-                        (host_id,),
-                    )
-                rows = cur.fetchall()
+        with self._txn(write=False) as cur:
+            if host_id is None:
+                cur.execute(
+                    "SELECT id, host_id, port, protocol, service_name, extra FROM services"
+                )
+            else:
+                cur.execute(
+                    "SELECT id, host_id, port, protocol, service_name, extra "
+                    "FROM services WHERE host_id = %s",
+                    (host_id,),
+                )
+            rows = cur.fetchall()
         out = []
         for r in rows:
             record = {
@@ -1117,15 +1220,13 @@ class PostgresStore:
         return out
 
     def save_node(self, node: Node) -> None:
-        with self._lock:
-            with self._cursor() as cur:
-                cur.execute(
-                    "INSERT INTO nodes (id, type, label) VALUES (%s, %s, %s) "
-                    "ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, "
-                    "label = EXCLUDED.label",
-                    (node.id, node.type, node.label),
-                )
-            self._conn.commit()
+        with self._txn() as cur:
+            cur.execute(
+                "INSERT INTO nodes (id, type, label) VALUES (%s, %s, %s) "
+                "ON CONFLICT (id) DO UPDATE SET type = EXCLUDED.type, "
+                "label = EXCLUDED.label",
+                (node.id, node.type, node.label),
+            )
 
 
 def _build_default_store() -> Backend:
