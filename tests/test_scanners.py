@@ -31,7 +31,7 @@ def test_run_nmap_scan_builds_expected_command():
         out = scanners.run_nmap_scan("10.0.0.5", ports="1-100")
     assert out == "<xml/>"
     args = mock_run.call_args[0][0]
-    assert args == ["nmap", "-sT", "-sV", "-p", "1-100", "-oX", "-", "10.0.0.5"]
+    assert args == ["nmap", "-sT", "-sV", "-Pn", "-p", "1-100", "-oX", "-", "10.0.0.5"]
 
 
 def test_run_nmap_scan_raises_on_nonzero_exit():
