@@ -150,6 +150,18 @@ def scan_target_url(
 
     host_id = storage.save_host({"hostname": hostname, "ip": ip, "os": None})
 
+    # A rescan should reflect the target's CURRENT state, not pile this
+    # run's findings on top of every previous run's -- especially since
+    # a rigid parser's verdict on the very same probe can legitimately
+    # change between scans (a path getting fixed, or, as with
+    # parse_exposed_paths's baseline diff, a parser getting smarter
+    # about what counts as evidence). This mirrors save_host's
+    # insert-or-update-by-ip semantics, just for findings. Only this
+    # scan's own source ("scanner") is cleared -- llm_inferred/manual
+    # findings from other flows (ingest_ambiguous_evidence, a human)
+    # aren't regenerated here, so they're left alone.
+    storage.delete_findings_for_host(host_id, source="scanner")
+
     # external -> host: we resolved and reached it just now, which is
     # itself the evidence for this edge -- same "CAN_REACH" semantics
     # nmap-based ingestion uses, just established via a live probe

@@ -74,6 +74,74 @@ def test_save_finding_stores_and_defaults():
     assert findings[0]["id"]  # generated
 
 
+def test_delete_findings_for_host_scoped_by_source():
+    store = InMemoryStore(seed_demo_data=False)
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "exposed_sensitive_path",
+            "severity": "critical",
+            "description": "stale scanner finding",
+            "evidence": "e",
+            "source": "scanner",
+        }
+    )
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "analyst_note",
+            "severity": "low",
+            "description": "manual note",
+            "evidence": "e",
+            "source": "manual",
+        }
+    )
+    store.save_finding(
+        {
+            "host_id": "other-host",
+            "type": "exposed_sensitive_path",
+            "severity": "critical",
+            "description": "different host, same source",
+            "evidence": "e",
+            "source": "scanner",
+        }
+    )
+
+    deleted = store.delete_findings_for_host("web", source="scanner")
+    assert deleted == 1
+
+    remaining = store.list_findings()
+    assert {f["host_id"] for f in remaining} == {"web", "other-host"}
+    assert {f["source"] for f in remaining if f["host_id"] == "web"} == {"manual"}
+
+
+def test_delete_findings_for_host_without_source_clears_all_sources():
+    store = InMemoryStore(seed_demo_data=False)
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "a",
+            "severity": "low",
+            "description": "d",
+            "evidence": "e",
+            "source": "scanner",
+        }
+    )
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "b",
+            "severity": "low",
+            "description": "d",
+            "evidence": "e",
+            "source": "manual",
+        }
+    )
+    deleted = store.delete_findings_for_host("web")
+    assert deleted == 2
+    assert store.list_findings() == []
+
+
 def test_save_relationship_then_confirm_promotes_it():
     store = InMemoryStore(seed_demo_data=False)
     proposed = Edge(

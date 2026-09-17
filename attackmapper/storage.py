@@ -86,6 +86,7 @@ class Backend(Protocol):
     def list_hosts(self) -> list[dict]: ...
     def list_services(self, host_id: str | None) -> list[dict]: ...
     def list_findings(self) -> list[dict]: ...
+    def delete_findings_for_host(self, host_id: str, source: str | None) -> int: ...
     # Live-network-usability additions (see module docstring): a clean
     # public way to add a non-host Node (an "external"/"account"/
     # "asset" node) instead of a caller reaching into a backend's
@@ -292,6 +293,23 @@ class InMemoryStore:
 
     def list_findings(self) -> list[dict]:
         return list(self._findings.values())
+
+    def delete_findings_for_host(self, host_id: str, source: str | None = None) -> int:
+        """Remove previously stored findings for `host_id`, optionally
+        scoped to a single `source` (e.g. "scanner"). This is what
+        lets a rescan REPLACE a host's automated findings instead of
+        piling every past run's results on top of each other forever
+        — the same insert-or-update spirit save_host already applies
+        to hosts, just for findings. llm_inferred/manual findings are
+        left untouched unless `source` explicitly targets them."""
+        to_delete = [
+            fid
+            for fid, f in self._findings.items()
+            if f["host_id"] == host_id and (source is None or f.get("source") == source)
+        ]
+        for fid in to_delete:
+            del self._findings[fid]
+        return len(to_delete)
 
     # -- Phase B: hosts/services (feed discovery output into the graph) --
 
@@ -589,6 +607,22 @@ class SQLiteStore:
                 "source, confidence FROM findings"
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def delete_findings_for_host(self, host_id: str, source: str | None = None) -> int:
+        """See InMemoryStore.delete_findings_for_host — same semantics,
+        SQL-backed."""
+        with self._lock:
+            if source is None:
+                cur = self._conn.execute(
+                    "DELETE FROM findings WHERE host_id = ?", (host_id,)
+                )
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM findings WHERE host_id = ? AND source = ?",
+                    (host_id, source),
+                )
+            self._conn.commit()
+            return cur.rowcount
 
     # -- Phase B: hosts/services (feed discovery output into the graph) --
 
@@ -966,6 +1000,22 @@ class PostgresStore:
                 rows = cur.fetchall()
         return [dict(r) for r in rows]
 
+    def delete_findings_for_host(self, host_id: str, source: str | None = None) -> int:
+        """See InMemoryStore.delete_findings_for_host — same semantics,
+        SQL-backed."""
+        with self._lock:
+            with self._cursor() as cur:
+                if source is None:
+                    cur.execute("DELETE FROM findings WHERE host_id = %s", (host_id,))
+                else:
+                    cur.execute(
+                        "DELETE FROM findings WHERE host_id = %s AND source = %s",
+                        (host_id, source),
+                    )
+                deleted = cur.rowcount
+            self._conn.commit()
+            return deleted
+
     # -- Phase B: hosts/services (feed discovery output into the graph) --
 
     def save_host(self, host: dict) -> str:
@@ -1176,6 +1226,14 @@ def list_services(host_id: str | None = None) -> list[dict]:
 
 def list_findings() -> list[dict]:
     return _default_store.list_findings()
+
+
+def delete_findings_for_host(host_id: str, source: str | None = None) -> int:
+    """Remove a host's previously stored findings, optionally scoped to
+    one `source` (e.g. "scanner"). See Backend.delete_findings_for_host
+    / pipeline.scan_target_url for why this exists: a rescan should
+    replace a host's automated findings, not accumulate them forever."""
+    return _default_store.delete_findings_for_host(host_id, source)
 
 
 def save_node(node: Node) -> None:

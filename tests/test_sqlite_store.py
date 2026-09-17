@@ -111,6 +111,64 @@ def test_save_finding_defaults_source_and_confidence(db_path):
     assert findings[0]["confidence"] == 1.0
 
 
+def test_delete_findings_for_host_scoped_by_source(db_path):
+    store = SQLiteStore(db_path, seed_demo_data=False)
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "exposed_sensitive_path",
+            "severity": "critical",
+            "description": "stale scanner finding",
+            "evidence": "e",
+            "source": "scanner",
+        }
+    )
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "analyst_note",
+            "severity": "low",
+            "description": "manual note",
+            "evidence": "e",
+            "source": "manual",
+        }
+    )
+
+    deleted = store.delete_findings_for_host("web", source="scanner")
+    assert deleted == 1
+
+    remaining = store.list_findings()
+    assert len(remaining) == 1
+    assert remaining[0]["source"] == "manual"
+
+
+def test_delete_findings_for_host_without_source_clears_all_sources(db_path):
+    store = SQLiteStore(db_path, seed_demo_data=False)
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "a",
+            "severity": "low",
+            "description": "d",
+            "evidence": "e",
+            "source": "scanner",
+        }
+    )
+    store.save_finding(
+        {
+            "host_id": "web",
+            "type": "b",
+            "severity": "low",
+            "description": "d",
+            "evidence": "e",
+            "source": "manual",
+        }
+    )
+    deleted = store.delete_findings_for_host("web")
+    assert deleted == 2
+    assert store.list_findings() == []
+
+
 def test_save_relationship_and_confirm(db_path):
     store = SQLiteStore(db_path, seed_demo_data=False)
     edge = Edge(

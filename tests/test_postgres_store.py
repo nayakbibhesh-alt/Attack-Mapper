@@ -98,6 +98,37 @@ def test_save_finding_requires_fields(store):
         store.save_finding({"type": "ssrf"})
 
 
+def test_delete_findings_for_host_scoped_by_source(store):
+    host_id = store.save_host({"hostname": "web01", "ip": "10.0.1.10", "os": None})
+    store.save_finding(
+        {
+            "host_id": host_id,
+            "type": "exposed_sensitive_path",
+            "severity": "critical",
+            "description": "stale scanner finding",
+            "evidence": "e",
+            "source": "scanner",
+        }
+    )
+    store.save_finding(
+        {
+            "host_id": host_id,
+            "type": "analyst_note",
+            "severity": "low",
+            "description": "manual note",
+            "evidence": "e",
+            "source": "manual",
+        }
+    )
+
+    deleted = store.delete_findings_for_host(host_id, source="scanner")
+    assert deleted == 1
+
+    remaining = store.list_findings()
+    assert len(remaining) == 1
+    assert remaining[0]["source"] == "manual"
+
+
 def test_save_relationship_and_confirm(store):
     edge = Edge(
         source="external", target="web", relationship="CAN_REACH",
