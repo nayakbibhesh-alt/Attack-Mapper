@@ -19,6 +19,8 @@ test.
 from __future__ import annotations
 
 import datetime
+import hashlib
+import secrets
 import shutil
 import socket
 import ssl
@@ -161,11 +163,70 @@ def tls_probe(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
     return info
 
 
+# How much of a hit's (or the baseline's) body we keep, both to feed
+# parsers.py's content-signature checks and to hash for the baseline
+# diff. Matches the truncation pattern already used in http_probe —
+# nothing downstream has to deal with an unbounded blob.
+_CAPTURED_BODY_BYTES = 4000
+
+
+def _hash_body(raw: bytes) -> str:
+    """sha256 over a fixed prefix of the raw body. Not a full-body
+    hash — this is a cheap "is this byte-for-byte the same response
+    as our baseline probe" signal, not a content-integrity check."""
+    return hashlib.sha256(raw[:_CAPTURED_BODY_BYTES]).hexdigest()
+
+
+def _capture_response(resp: requests.Response) -> dict:
+    """Shared shape for both the baseline probe and a real hit: status
+    code, full body length, a truncated body (decoded latin-1 so exact
+    byte values — e.g. a ZIP file's magic bytes — round-trip losslessly
+    instead of being mangled or dropped the way utf-8 decoding would),
+    and a hash of that truncated body for the baseline diff."""
+    raw = resp.content[:_CAPTURED_BODY_BYTES]
+    return {
+        "status_code": resp.status_code,
+        "length": len(resp.content),
+        "body": raw.decode("latin-1"),
+        "body_hash": _hash_body(resp.content),
+    }
+
+
+def _baseline_probe(base_url: str, timeout: float) -> dict:
+    """GET one path that's certain not to exist on `base_url`, so
+    exposed_paths_probe has something to diff real hits against. A
+    server that answers every unmatched route with the same page (SPA
+    catch-alls, a misconfigured default vhost) would otherwise make
+    every entry in SENSITIVE_PATHS look like a confirmed hit. Same
+    constraints as every other probe here — read-only, GET, no auth —
+    and raises RuntimeError on failure rather than failing silently,
+    since a failed baseline means the rest of this probe can't be
+    trusted either."""
+    probe_path = f"/__attackmapper-baseline-{secrets.token_hex(16)}__"
+    url = base_url.rstrip("/") + probe_path
+    try:
+        resp = requests.get(url, timeout=timeout, allow_redirects=False)
+    except requests.RequestException as exc:
+        raise RuntimeError(f"baseline probe of {url!r} failed: {exc}") from exc
+    return _capture_response(resp)
+
+
 def exposed_paths_probe(base_url: str, timeout: float = 5.0) -> dict:
     """GET each path in SENSITIVE_PATHS against base_url and report
-    which ones return 200. Read-only, GET-only, fixed list — this is
+    which ones return 200, alongside a baseline probe of a known-
+    nonexistent path. Read-only, GET-only, fixed list — this is
     reconnaissance identical in kind to what a normal page load or a
-    search-engine crawler already does against a public site."""
+    search-engine crawler already does against a public site.
+
+    A bare 200 isn't reported as a confirmed hit by parsers.py unless
+    it's backed by actual evidence, so each hit here carries its body
+    content (not just length) for content-signature checks, and the
+    baseline lets parsers.py tell "this path genuinely exists" apart
+    from "this server returns the same fallback response for
+    everything." Returns {"baseline": {...}, "hits": {path: {...}}}.
+    """
+    baseline = _baseline_probe(base_url, timeout)
+
     hits: dict[str, dict] = {}
     for path in SENSITIVE_PATHS:
         url = base_url.rstrip("/") + path
@@ -174,8 +235,8 @@ def exposed_paths_probe(base_url: str, timeout: float = 5.0) -> dict:
         except requests.RequestException:
             continue
         if resp.status_code == 200:
-            hits[path] = {"status_code": resp.status_code, "length": len(resp.content)}
-    return hits
+            hits[path] = _capture_response(resp)
+    return {"baseline": baseline, "hits": hits}
 
 
 def cors_probe(url: str, timeout: float = 5.0) -> dict:

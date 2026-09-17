@@ -81,6 +81,55 @@ _CRITICAL_EXPOSED_PATHS = {
 }
 _BENIGN_EXPOSED_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
 
+# Per-path (or path-family) content signatures. These are what actually
+# confirm a 200 response IS the sensitive file/output it claims to be,
+# rather than some other 200 (a generic error page, a custom 404, an
+# unrelated app route) that merely happens to share the status code.
+# Each pattern is intentionally loose/heuristic — see the confidence
+# semantics note above _SECRET_PATTERN — which is exactly why a match
+# earns full confidence/severity but a non-match does NOT get treated
+# as a confirmed false positive, only as "can't confirm from content
+# alone" (see _signature_check below and parse_exposed_paths).
+_ENV_LINE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\s*=.*$", re.MULTILINE)
+_HTML_MARKER_RE = re.compile(r"<html|<!DOCTYPE\s+html", re.IGNORECASE)
+_GIT_HEAD_RE = re.compile(r"^(ref:\s*refs/heads/\S+|[0-9a-f]{40})\s*$", re.MULTILINE)
+_GIT_CONFIG_RE = re.compile(r"^\s*\[core\]", re.MULTILINE)
+_ZIP_MAGIC = "PK\x03\x04"  # body is decoded latin-1, so this is an exact byte match
+_SQL_DUMP_RE = re.compile(r"\b(INSERT INTO|CREATE TABLE)\b", re.IGNORECASE)
+_PHP_RE = re.compile(r"<\?php")
+_AWS_CREDENTIALS_RE = re.compile(
+    r"\[[\w-]+\][^\[]{0,500}?aws_access_key_id\s*=", re.IGNORECASE | re.DOTALL
+)
+_APACHE_MOD_STATUS_RE = re.compile(
+    r"Apache Server Status|Scoreboard Key", re.IGNORECASE
+)
+
+
+def _signature_check(path: str, body: str) -> bool | None:
+    """Return True if `body` looks like the real file/output expected
+    at `path`, False if a signature is defined for this path and the
+    body clearly doesn't match it, or None if this path has no defined
+    signature at all (content alone can neither confirm nor rule it
+    out). Used by parse_exposed_paths to decide whether a 200 that
+    survives the baseline diff is actually independent evidence."""
+    if path in ("/.env", "/.env.local"):
+        return bool(_ENV_LINE_RE.search(body)) and not _HTML_MARKER_RE.search(body)
+    if path == "/.git/HEAD":
+        return bool(_GIT_HEAD_RE.search(body))
+    if path == "/.git/config":
+        return bool(_GIT_CONFIG_RE.search(body))
+    if path == "/backup.zip":
+        return body.startswith(_ZIP_MAGIC)
+    if path == "/backup.sql":
+        return bool(_SQL_DUMP_RE.search(body)) and not _HTML_MARKER_RE.search(body)
+    if path in ("/wp-config.php.bak", "/config.php.bak"):
+        return bool(_PHP_RE.search(body)) and not _HTML_MARKER_RE.search(body)
+    if path == "/.aws/credentials":
+        return bool(_AWS_CREDENTIALS_RE.search(body))
+    if path == "/server-status":
+        return bool(_APACHE_MOD_STATUS_RE.search(body))
+    return None
+
 # Loose patterns for common secret-shaped values in a response body.
 # A regex hit here is a HEURISTIC, not a confirmation — false positives
 # are possible (e.g. a field literally named "token" with a placeholder
@@ -345,28 +394,118 @@ def parse_tls_probe(hostname: str, info: dict) -> list[dict]:
     return findings
 
 
-def parse_exposed_paths(base_url: str, hits: dict) -> list[dict]:
+def parse_exposed_paths(base_url: str, probe_result: dict) -> list[dict]:
     """Turn a scanners.exposed_paths_probe() result into finding
     dicts. Paths that are normal/expected to be public (robots.txt
-    etc.) are deliberately not flagged."""
+    etc.) are deliberately not flagged.
+
+    A bare 200 is never treated as confirmation by itself:
+
+    1. Each hit is diffed against `probe_result["baseline"]` (a probe
+       of a known-nonexistent path). A hit that's indistinguishable
+       from the baseline is the server's generic fallback response,
+       not evidence the path exists — those are rolled into a single
+       low-confidence "treat these results with caution" note instead
+       of being reported as individual critical findings.
+    2. Anything left is checked against a per-path content signature
+       (see _signature_check). Only a signature match earns the
+       path's full severity at confidence 1.0. A 200 that clears the
+       baseline but matches no known signature isn't dropped (that
+       would risk a false negative) but also isn't called critical —
+       it's reported at reduced confidence, flagged for manual
+       confirmation.
+    """
+    base = base_url.rstrip("/")
+    baseline = probe_result.get("baseline") or {}
+    hits = probe_result.get("hits") or {}
+
     findings: list[dict] = []
+    fallback_matched_paths: list[str] = []
+
     for path, info in hits.items():
         if path in _BENIGN_EXPOSED_PATHS:
             continue
-        severity = "critical" if path in _CRITICAL_EXPOSED_PATHS else "medium"
+
+        url = f"{base}{path}"
+        body = info.get("body", "") or ""
+
+        matches_baseline = bool(baseline) and (
+            info.get("status_code") == baseline.get("status_code")
+            and info.get("length") == baseline.get("length")
+            and info.get("body_hash") == baseline.get("body_hash")
+        )
+        if matches_baseline:
+            fallback_matched_paths.append(path)
+            continue
+
+        full_severity = "critical" if path in _CRITICAL_EXPOSED_PATHS else "medium"
+
+        if _signature_check(path, body):
+            findings.append(
+                {
+                    "type": "exposed_sensitive_path",
+                    "severity": full_severity,
+                    "description": (
+                        f"{path} is publicly accessible and its content matches "
+                        f"the expected signature for this file type "
+                        f"({info['status_code']}, {info['length']} bytes)"
+                    ),
+                    "evidence": (
+                        f"GET {url} -> {info['status_code']}; body content "
+                        "signature-matched this path's expected file type and "
+                        "differs from this server's baseline (fallback) "
+                        "response — actual secret values, if any, are redacted "
+                        "from this evidence"
+                    ),
+                    "source": "scanner",
+                    "confidence": 1.0,
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "type": "exposed_sensitive_path",
+                    "severity": "medium",
+                    "description": (
+                        f"{path} returned 200 ({info['status_code']}, "
+                        f"{info['length']} bytes), but its content could not "
+                        "be confirmed as the real file — needs manual review"
+                    ),
+                    "evidence": (
+                        f"GET {url} -> {info['status_code']}; response differs "
+                        "from this server's baseline (fallback) response, but "
+                        "did not match a known content signature for this path "
+                        "— unconfirmed, not yet ruled a false positive"
+                    ),
+                    "source": "scanner",
+                    "confidence": 0.5,
+                }
+            )
+
+    if fallback_matched_paths:
         findings.append(
             {
-                "type": "exposed_sensitive_path",
-                "severity": severity,
+                "type": "exposed_path_scan_unreliable",
+                "severity": "low",
                 "description": (
-                    f"{path} is publicly accessible "
-                    f"({info['status_code']}, {info['length']} bytes)"
+                    "This server returns an identical 200 response for a "
+                    "known-nonexistent path, so a 200 on a sensitive path is "
+                    "not independent evidence it exists — treat exposed-path "
+                    "results for this host with caution"
                 ),
-                "evidence": f"GET {base_url.rstrip('/')}{path} -> {info['status_code']}",
+                "evidence": (
+                    f"Baseline probe and {len(fallback_matched_paths)} "
+                    "sensitive path(s) "
+                    f"({', '.join(sorted(fallback_matched_paths))}) all "
+                    f"returned status {baseline.get('status_code')}, "
+                    f"{baseline.get('length')} bytes, and an identical body "
+                    "hash"
+                ),
                 "source": "scanner",
-                "confidence": 1.0,
+                "confidence": 0.1,
             }
         )
+
     return findings
 
 

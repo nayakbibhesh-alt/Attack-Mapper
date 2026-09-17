@@ -205,15 +205,130 @@ def test_parse_tls_probe_clean_cert_no_findings():
     assert parse_tls_probe("fine.lab.internal", info) == []
 
 
-def test_parse_exposed_paths_flags_critical_but_not_benign():
+def _probe_result(baseline: dict, hits: dict) -> dict:
+    """Build the {"baseline", "hits"} shape scanners.exposed_paths_probe
+    returns, filling in a body_hash for each entry the way scanners.py
+    does, so tests can write bodies as plain strings."""
+    import hashlib
+
+    def _hash(body: str) -> str:
+        return hashlib.sha256(body.encode("latin-1")[:4000]).hexdigest()
+
+    baseline = {**baseline, "body_hash": _hash(baseline["body"])}
     hits = {
-        "/.git/HEAD": {"status_code": 200, "length": 23},
-        "/robots.txt": {"status_code": 200, "length": 10},
+        path: {**info, "body_hash": _hash(info["body"])} for path, info in hits.items()
     }
-    findings = parse_exposed_paths("https://app01.lab.internal", hits)
+    return {"baseline": baseline, "hits": hits}
+
+
+def test_parse_exposed_paths_benign_paths_never_flagged():
+    baseline = {"status_code": 404, "length": 9, "body": "not found"}
+    hits = {"/robots.txt": {"status_code": 200, "length": 10, "body": "User-agent"}}
+    findings = parse_exposed_paths(
+        "https://app01.lab.internal", _probe_result(baseline, hits)
+    )
+    assert findings == []
+
+
+def test_parse_exposed_paths_confirms_real_hit_with_matching_signature():
+    baseline = {"status_code": 404, "length": 9, "body": "not found"}
+    hits = {
+        "/.git/HEAD": {
+            "status_code": 200,
+            "length": 23,
+            "body": "ref: refs/heads/main\n",
+        }
+    }
+    findings = parse_exposed_paths(
+        "https://app01.lab.internal", _probe_result(baseline, hits)
+    )
     assert len(findings) == 1
     assert findings[0]["type"] == "exposed_sensitive_path"
     assert findings[0]["severity"] == "critical"
+    assert findings[0]["confidence"] == 1.0
+
+
+def test_parse_exposed_paths_downgrades_hits_matching_baseline_fallback():
+    # Every sensitive path returns byte-for-byte the same thing the
+    # baseline (a known-nonexistent path) does -- an SPA/vhost fallback,
+    # not evidence any of these paths actually exist.
+    fallback_body = "<html>fallback app shell</html>"
+    baseline = {"status_code": 200, "length": len(fallback_body), "body": fallback_body}
+    hits = {
+        "/.git/HEAD": {
+            "status_code": 200,
+            "length": len(fallback_body),
+            "body": fallback_body,
+        },
+        "/.env": {
+            "status_code": 200,
+            "length": len(fallback_body),
+            "body": fallback_body,
+        },
+    }
+    findings = parse_exposed_paths(
+        "https://spa.lab.internal", _probe_result(baseline, hits)
+    )
+    # No per-path critical findings -- just the one low-confidence note.
+    assert len(findings) == 1
+    assert findings[0]["type"] == "exposed_path_scan_unreliable"
+    assert findings[0]["severity"] == "low"
+    assert findings[0]["confidence"] < 0.5
+    assert all(f["severity"] != "critical" for f in findings)
+
+
+def test_parse_exposed_paths_unconfirmed_hit_is_not_critical():
+    # Clears the baseline diff (different from the fallback response),
+    # but the body doesn't match .env's KEY=VALUE signature -- can't
+    # confirm, can't rule out, so it should land at reduced confidence
+    # and never at "critical".
+    baseline = {"status_code": 404, "length": 9, "body": "not found"}
+    hits = {
+        "/.env": {
+            "status_code": 200,
+            "length": 21,
+            "body": "<html>Access denied</html>",
+        }
+    }
+    findings = parse_exposed_paths(
+        "https://app01.lab.internal", _probe_result(baseline, hits)
+    )
+    assert len(findings) == 1
+    assert findings[0]["type"] == "exposed_sensitive_path"
+    assert findings[0]["severity"] != "critical"
+    assert findings[0]["confidence"] == 0.5
+
+
+def test_parse_exposed_paths_server_status_needs_mod_status_markers():
+    baseline = {"status_code": 404, "length": 9, "body": "not found"}
+    # A 200 for /server-status that is NOT actual mod_status output
+    # (e.g. a generic app page) should not get full confidence.
+    hits = {
+        "/server-status": {
+            "status_code": 200,
+            "length": 12,
+            "body": "hello world!",
+        }
+    }
+    findings = parse_exposed_paths(
+        "https://app01.lab.internal", _probe_result(baseline, hits)
+    )
+    assert len(findings) == 1
+    assert findings[0]["confidence"] == 0.5
+
+    # Real mod_status output should still be confirmed at full severity.
+    hits_real = {
+        "/server-status": {
+            "status_code": 200,
+            "length": 200,
+            "body": "Apache Server Status for app01\n...Scoreboard Key...",
+        }
+    }
+    findings_real = parse_exposed_paths(
+        "https://app01.lab.internal", _probe_result(baseline, hits_real)
+    )
+    assert len(findings_real) == 1
+    assert findings_real[0]["confidence"] == 1.0
 
 
 def test_parse_cors_probe_flags_reflected_origin_with_credentials():

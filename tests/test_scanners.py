@@ -80,6 +80,52 @@ def test_http_probe_raises_runtime_error_on_request_exception():
             scanners.http_probe("http://10.0.0.5/")
 
 
+def test_exposed_paths_probe_captures_baseline_and_hit_bodies():
+    baseline_resp = MagicMock(status_code=404, content=b"not found here")
+
+    def fake_get(url, timeout=None, allow_redirects=None):
+        if "__attackmapper-baseline-" in url:
+            return baseline_resp
+        if url.endswith("/.env"):
+            return MagicMock(status_code=200, content=b"DB_PASSWORD=hunter2\n")
+        return MagicMock(status_code=404, content=b"not found here")
+
+    with patch("requests.get", side_effect=fake_get):
+        result = scanners.exposed_paths_probe("https://app01.lab.internal")
+
+    assert result["baseline"]["status_code"] == 404
+    assert result["baseline"]["length"] == len(b"not found here")
+    assert result["baseline"]["body"] == "not found here"
+    assert "body_hash" in result["baseline"]
+
+    assert set(result["hits"].keys()) == {"/.env"}
+    hit = result["hits"]["/.env"]
+    assert hit["status_code"] == 200
+    assert hit["body"] == "DB_PASSWORD=hunter2\n"
+    assert hit["length"] == len(b"DB_PASSWORD=hunter2\n")
+    assert "body_hash" in hit
+
+
+def test_exposed_paths_probe_baseline_matches_fallback_for_everything():
+    # A server that answers every unmatched route the same way (SPA
+    # catch-all, misconfigured default vhost): baseline and every
+    # sensitive path come back with an identical 200 + identical body.
+    fallback_resp = MagicMock(status_code=200, content=b"<html>fallback app shell</html>")
+    with patch("requests.get", return_value=fallback_resp):
+        result = scanners.exposed_paths_probe("https://spa.lab.internal")
+
+    assert result["baseline"]["status_code"] == 200
+    assert len(result["hits"]) == len(scanners.SENSITIVE_PATHS)
+    for hit in result["hits"].values():
+        assert hit["body_hash"] == result["baseline"]["body_hash"]
+
+
+def test_exposed_paths_probe_raises_runtime_error_when_baseline_fails():
+    with patch("requests.get", side_effect=requests.ConnectionError("refused")):
+        with pytest.raises(RuntimeError, match="baseline probe"):
+            scanners.exposed_paths_probe("https://app01.lab.internal")
+
+
 def test_introspect_postgres_roles_raises_on_connection_failure():
     import psycopg2
 

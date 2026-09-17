@@ -190,8 +190,8 @@ def scan_target_url(
             errors.append(str(exc))
 
     try:
-        hits = scanners.exposed_paths_probe(base_url)
-        for f in parsers.parse_exposed_paths(base_url, hits):
+        probe_result = scanners.exposed_paths_probe(base_url)
+        for f in parsers.parse_exposed_paths(base_url, probe_result):
             storage.save_finding({**f, "host_id": host_id})
     except RuntimeError as exc:
         errors.append(str(exc))
