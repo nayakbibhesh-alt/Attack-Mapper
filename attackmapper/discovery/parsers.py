@@ -52,7 +52,34 @@ _EXPECTED_HTTPS_HEADERS = [
     "x-content-type-options",
     "x-frame-options",
     "content-security-policy",
+    "referrer-policy",
+    "permissions-policy",
 ]
+
+# Response headers that commonly leak software/version info. A version
+# NUMBER in the value is what makes this worth flagging (e.g. "nginx"
+# alone is far less useful to an attacker than "nginx/1.18.0").
+_DISCLOSURE_HEADERS = ["server", "x-powered-by", "x-aspnet-version"]
+_VERSION_RE = re.compile(r"\d+\.\d+")
+
+# Deprecated/weak TLS versions worth an automatic finding.
+WEAK_TLS_VERSIONS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
+
+# Sensitive-path exposure: split into "always worth flagging" (VCS
+# dirs, secrets, backups) vs. paths that are normal/expected to be
+# public and shouldn't generate a finding just for existing.
+_CRITICAL_EXPOSED_PATHS = {
+    "/.git/HEAD",
+    "/.git/config",
+    "/.env",
+    "/.env.local",
+    "/.aws/credentials",
+    "/wp-config.php.bak",
+    "/config.php.bak",
+    "/backup.sql",
+    "/backup.zip",
+}
+_BENIGN_EXPOSED_PATHS = {"/robots.txt", "/sitemap.xml", "/.well-known/security.txt"}
 
 # Loose patterns for common secret-shaped values in a response body.
 # A regex hit here is a HEURISTIC, not a confirmation — false positives
@@ -200,8 +227,10 @@ def parse_http_probe(probe: dict) -> list[dict]:
             }
         )
 
+    headers = probe.get("headers", {}) or {}
+    headers_lower = {k.lower(): v for k, v in headers.items()}
+
     if url.startswith("https"):
-        headers_lower = {k.lower() for k in probe.get("headers", {})}
         missing = [h for h in _EXPECTED_HTTPS_HEADERS if h not in headers_lower]
         if missing:
             findings.append(
@@ -217,6 +246,172 @@ def parse_http_probe(probe: dict) -> list[dict]:
                 }
             )
 
+    for h in _DISCLOSURE_HEADERS:
+        val = headers_lower.get(h)
+        if val and _VERSION_RE.search(val):
+            findings.append(
+                {
+                    "type": "information_disclosure",
+                    "severity": "low",
+                    "description": (
+                        f"{h.title()} header discloses software/version info: {val}"
+                    ),
+                    "evidence": f"GET {url} response header {h}: {val}",
+                    "source": "scanner",
+                    "confidence": 1.0,
+                }
+            )
+
+    set_cookie = headers_lower.get("set-cookie")
+    if set_cookie and url.startswith("https"):
+        cookie_lower = set_cookie.lower()
+        missing_flags = [f for f in ("secure", "httponly") if f not in cookie_lower]
+        if missing_flags:
+            findings.append(
+                {
+                    "type": "insecure_cookie",
+                    "severity": "medium",
+                    "description": f"Set-Cookie is missing: {', '.join(missing_flags)}",
+                    "evidence": (
+                        f"GET {url} response Set-Cookie omits {', '.join(missing_flags)}"
+                    ),
+                    "source": "scanner",
+                    "confidence": 0.9,
+                }
+            )
+
+    return findings
+
+
+def parse_tls_probe(hostname: str, info: dict) -> list[dict]:
+    """Turn a scanners.tls_probe() result into finding dicts (no
+    host_id yet — same convention as parse_http_probe)."""
+    findings: list[dict] = []
+    port = info.get("port")
+
+    if info.get("verify_error"):
+        findings.append(
+            {
+                "type": "invalid_tls_certificate",
+                "severity": "high",
+                "description": (
+                    f"TLS certificate for {hostname} failed verification: "
+                    f"{info['verify_error']}"
+                ),
+                "evidence": f"TLS handshake to {hostname}:{port} — {info['verify_error']}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+
+    protocol = info.get("protocol")
+    if protocol in WEAK_TLS_VERSIONS:
+        findings.append(
+            {
+                "type": "weak_tls_protocol",
+                "severity": "high",
+                "description": f"Server negotiated {protocol}, a deprecated TLS/SSL version",
+                "evidence": f"TLS handshake to {hostname}:{port} negotiated {protocol}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+
+    days = info.get("days_until_expiry")
+    if days is not None:
+        if days < 0:
+            findings.append(
+                {
+                    "type": "expired_certificate",
+                    "severity": "critical",
+                    "description": f"TLS certificate for {hostname} expired {-days} day(s) ago",
+                    "evidence": f"TLS handshake to {hostname}:{port}, notAfter={info.get('not_after')}",
+                    "source": "scanner",
+                    "confidence": 1.0,
+                }
+            )
+        elif days <= 14:
+            findings.append(
+                {
+                    "type": "certificate_expiring_soon",
+                    "severity": "medium",
+                    "description": f"TLS certificate for {hostname} expires in {days} day(s)",
+                    "evidence": f"TLS handshake to {hostname}:{port}, notAfter={info.get('not_after')}",
+                    "source": "scanner",
+                    "confidence": 1.0,
+                }
+            )
+
+    return findings
+
+
+def parse_exposed_paths(base_url: str, hits: dict) -> list[dict]:
+    """Turn a scanners.exposed_paths_probe() result into finding
+    dicts. Paths that are normal/expected to be public (robots.txt
+    etc.) are deliberately not flagged."""
+    findings: list[dict] = []
+    for path, info in hits.items():
+        if path in _BENIGN_EXPOSED_PATHS:
+            continue
+        severity = "critical" if path in _CRITICAL_EXPOSED_PATHS else "medium"
+        findings.append(
+            {
+                "type": "exposed_sensitive_path",
+                "severity": severity,
+                "description": (
+                    f"{path} is publicly accessible "
+                    f"({info['status_code']}, {info['length']} bytes)"
+                ),
+                "evidence": f"GET {base_url.rstrip('/')}{path} -> {info['status_code']}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+    return findings
+
+
+def parse_cors_probe(url: str, info: dict) -> list[dict]:
+    """Turn a scanners.cors_probe() result into finding dicts."""
+    allow_origin = info.get("allow_origin")
+    allow_creds = (info.get("allow_credentials") or "").lower() == "true"
+    probe_origin = info.get("probe_origin")
+    reflects = allow_origin == probe_origin or allow_origin == "*"
+
+    findings: list[dict] = []
+    if reflects and allow_creds:
+        findings.append(
+            {
+                "type": "cors_misconfiguration",
+                "severity": "high",
+                "description": (
+                    "Server reflects an arbitrary Origin in "
+                    "Access-Control-Allow-Origin while also allowing "
+                    "credentials — lets any website read this site's "
+                    "authenticated responses on a victim's behalf"
+                ),
+                "evidence": (
+                    f"GET {url} with Origin: {probe_origin} -> "
+                    f"Access-Control-Allow-Origin: {allow_origin}, "
+                    f"Access-Control-Allow-Credentials: {info.get('allow_credentials')}"
+                ),
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+    elif allow_origin == "*":
+        findings.append(
+            {
+                "type": "cors_wildcard",
+                "severity": "low",
+                "description": (
+                    "Access-Control-Allow-Origin is '*', allowing any site "
+                    "to read this endpoint's (non-credentialed) responses"
+                ),
+                "evidence": f"GET {url} -> Access-Control-Allow-Origin: *",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
     return findings
 
 

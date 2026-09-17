@@ -18,10 +18,36 @@ test.
 
 from __future__ import annotations
 
+import datetime
 import shutil
+import socket
+import ssl
 import subprocess
 
 import requests
+
+# A small, fixed list of well-known paths worth checking for public
+# exposure. Every request below is a plain, unauthenticated GET to an
+# exact path — the same request any visitor's browser makes for
+# /robots.txt — never a brute-force wordlist, never a guess at
+# credentials, never anything beyond this list.
+SENSITIVE_PATHS: list[str] = [
+    "/.git/HEAD",
+    "/.git/config",
+    "/.env",
+    "/.env.local",
+    "/.aws/credentials",
+    "/.DS_Store",
+    "/.svn/entries",
+    "/wp-config.php.bak",
+    "/config.php.bak",
+    "/backup.zip",
+    "/backup.sql",
+    "/server-status",
+    "/.well-known/security.txt",
+    "/robots.txt",
+    "/sitemap.xml",
+]
 
 
 def run_nmap_scan(target: str, ports: str = "1-1024", timeout: float = 120.0) -> str:
@@ -69,6 +95,103 @@ def http_probe(url: str, timeout: float = 5.0) -> dict:
         "status_code": resp.status_code,
         "headers": dict(resp.headers),
         "body": resp.text[:8000],
+    }
+
+
+def tls_probe(hostname: str, port: int = 443, timeout: float = 5.0) -> dict:
+    """Read-only TLS handshake against hostname:port — inspects
+    whatever certificate and protocol version the server presents
+    during a normal handshake, exactly what a browser visiting the
+    site would see. Never sends application data.
+
+    Pass 1 does a real, hostname-verifying handshake (what a browser
+    does). If that fails verification, pass 2 reconnects with
+    verification disabled purely so we can still learn which
+    protocol/cipher the server negotiates — a host with a bad
+    certificate should still get a protocol-level finding rather than
+    an opaque failure.
+    """
+    info: dict = {
+        "hostname": hostname,
+        "port": port,
+        "protocol": None,
+        "cipher": None,
+        "not_after": None,
+        "days_until_expiry": None,
+        "verified": False,
+        "verify_error": None,
+    }
+
+    ctx = ssl.create_default_context()
+    cert = None
+    try:
+        with socket.create_connection((hostname, port), timeout=timeout) as sock:
+            with ctx.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+                cert = tls_sock.getpeercert()
+                info["protocol"] = tls_sock.version()
+                cipher = tls_sock.cipher()
+                info["cipher"] = cipher[0] if cipher else None
+                info["verified"] = True
+    except ssl.SSLCertVerificationError as exc:
+        info["verify_error"] = exc.verify_message or str(exc)
+    except (OSError, ssl.SSLError) as exc:
+        raise RuntimeError(f"TLS probe of {hostname}:{port} failed: {exc}") from exc
+
+    if cert:
+        not_after = cert.get("notAfter")
+        info["not_after"] = not_after
+        if not_after:
+            expiry = datetime.datetime.strptime(not_after, "%b %d %H:%M:%S %Y %Z")
+            info["days_until_expiry"] = (expiry - datetime.datetime.utcnow()).days
+
+    if not info["verified"]:
+        try:
+            noverify_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            noverify_ctx.check_hostname = False
+            noverify_ctx.verify_mode = ssl.CERT_NONE
+            with socket.create_connection((hostname, port), timeout=timeout) as sock:
+                with noverify_ctx.wrap_socket(sock, server_hostname=hostname) as tls_sock:
+                    info["protocol"] = tls_sock.version()
+                    cipher = tls_sock.cipher()
+                    info["cipher"] = cipher[0] if cipher else None
+        except (OSError, ssl.SSLError):
+            pass  # best-effort only -- a hard connect failure already
+            # would have raised RuntimeError above in pass 1
+
+    return info
+
+
+def exposed_paths_probe(base_url: str, timeout: float = 5.0) -> dict:
+    """GET each path in SENSITIVE_PATHS against base_url and report
+    which ones return 200. Read-only, GET-only, fixed list — this is
+    reconnaissance identical in kind to what a normal page load or a
+    search-engine crawler already does against a public site."""
+    hits: dict[str, dict] = {}
+    for path in SENSITIVE_PATHS:
+        url = base_url.rstrip("/") + path
+        try:
+            resp = requests.get(url, timeout=timeout, allow_redirects=False)
+        except requests.RequestException:
+            continue
+        if resp.status_code == 200:
+            hits[path] = {"status_code": resp.status_code, "length": len(resp.content)}
+    return hits
+
+
+def cors_probe(url: str, timeout: float = 5.0) -> dict:
+    """Single read-only GET carrying a foreign Origin header, purely
+    to observe how the server's CORS policy reflects it in response
+    headers — the same signal a browser-based CORS check reads.
+    Sends no credentials of its own and issues no follow-up request."""
+    probe_origin = "https://cors-probe.invalid.example"
+    try:
+        resp = requests.get(url, timeout=timeout, headers={"Origin": probe_origin})
+    except requests.RequestException as exc:
+        raise RuntimeError(f"CORS probe of {url!r} failed: {exc}") from exc
+    return {
+        "allow_origin": resp.headers.get("Access-Control-Allow-Origin"),
+        "allow_credentials": resp.headers.get("Access-Control-Allow-Credentials"),
+        "probe_origin": probe_origin,
     }
 
 

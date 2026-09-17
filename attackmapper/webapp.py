@@ -29,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit, parse_qs
 
-from . import storage
+from . import remediation, storage
 from .graph import AttackGraph
 
 logger = logging.getLogger(__name__)
@@ -87,7 +87,10 @@ class Api:
             "relationships": jsonable(storage.list_relationships()),
             "hosts": storage.list_hosts(),
             "services": storage.list_services(),
-            "findings": storage.list_findings(),
+            "findings": [
+                {**f, "remedy": remediation.remedy_for(f["type"])}
+                for f in storage.list_findings()
+            ],
             "backend": storage.describe_backend(),
         }
 
@@ -133,7 +136,11 @@ class Api:
 
     @staticmethod
     def get_findings(_qs):
-        return 200, {"findings": storage.list_findings()}
+        findings = [
+            {**f, "remedy": remediation.remedy_for(f["type"])}
+            for f in storage.list_findings()
+        ]
+        return 200, {"findings": findings}
 
     @staticmethod
     def post_analyze(body):
@@ -221,6 +228,36 @@ class Api:
         return 200, summary
 
     @staticmethod
+    def post_scan_url(body):
+        target = body.get("target")
+        if not target:
+            return 400, {"error": "target is required"}
+        run_nmap = bool(body.get("run_nmap", True))
+        from .discovery import pipeline
+
+        try:
+            result = pipeline.scan_target_url(target, run_nmap=run_nmap)
+        except RuntimeError as exc:
+            return 424, {"error": str(exc)}
+
+        findings = [
+            {**f, "remedy": remediation.remedy_for(f["type"])}
+            for f in result["findings"]
+        ]
+        severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+        findings.sort(key=lambda f: severity_rank.get(f.get("severity"), 4))
+
+        return 200, {
+            "target": result["target"],
+            "hostname": result["hostname"],
+            "ip": result["ip"],
+            "host_id": result["host_id"],
+            "findings": findings,
+            "paths": [serialize_path(p) for p in result["paths"]],
+            "errors": result["errors"],
+        }
+
+    @staticmethod
     def post_discover(body):
         scope = body.get("scope") or []
         if isinstance(scope, str):
@@ -273,6 +310,7 @@ ROUTES_POST = {
     "/api/infer": Api.post_infer,
     "/api/interpret-evidence": Api.post_interpret_evidence,
     "/api/scan-nmap": Api.post_scan_nmap,
+    "/api/scan-url": Api.post_scan_url,
     "/api/discover": Api.post_discover,
     "/api/seed-demo": Api.post_seed_demo,
     "/api/reset": Api.post_reset,

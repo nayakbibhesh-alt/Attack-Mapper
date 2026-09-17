@@ -137,6 +137,40 @@ def cmd_scan_nmap(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_scan_url(args: argparse.Namespace) -> int:
+    from . import remediation
+    from .discovery import pipeline
+
+    try:
+        result = pipeline.scan_target_url(args.target, run_nmap=not args.no_nmap)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    print(f"target: {result['target']}  ({result['hostname']} -> {result['ip']})\n")
+
+    severity_rank = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+    findings = sorted(
+        result["findings"], key=lambda f: severity_rank.get(f.get("severity"), 4)
+    )
+    if findings:
+        print(f"findings ({len(findings)}):")
+        for f in findings:
+            print(f"  [{f['severity'].upper():8s}] {f['type']}: {f['description']}")
+            print(f"             remedy: {remediation.remedy_for(f['type'])}")
+    else:
+        print("findings: none")
+
+    print(f"\nattack paths from external to this host ({len(result['paths'])}):")
+    graph = AttackGraph([], [])  # only used for its (static) describe_path/path_confidence
+    for path in result["paths"]:
+        print(f"  ({graph.path_confidence(path):.2f}) {graph.describe_path(path)}")
+
+    for err in result["errors"]:
+        print(f"note: {err}", file=sys.stderr)
+    return 0
+
+
 def cmd_interpret(args: argparse.Namespace) -> int:
     from .discovery import pipeline
 
@@ -434,6 +468,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--target", required=True)
     p_scan.add_argument("--ports", default="1-1024")
     p_scan.set_defaults(func=cmd_scan_nmap)
+
+    p_scan_url = sub.add_parser(
+        "scan-url",
+        help="run every read-only web probe (headers, TLS, exposed paths, "
+        "CORS, nmap) against a target URL and report findings + attack paths",
+    )
+    p_scan_url.add_argument("--target", required=True, help="e.g. https://example.com")
+    p_scan_url.add_argument(
+        "--no-nmap", action="store_true", help="skip the nmap port-scan step"
+    )
+    p_scan_url.set_defaults(func=cmd_scan_url)
 
     p_ask = sub.add_parser(
         "ask",

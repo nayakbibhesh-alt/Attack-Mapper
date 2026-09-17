@@ -11,9 +11,12 @@ a sandbox.
 from pathlib import Path
 
 from attackmapper.discovery.parsers import (
+    parse_cors_probe,
+    parse_exposed_paths,
     parse_http_probe,
     parse_nmap_xml,
     parse_postgres_roles,
+    parse_tls_probe,
 )
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -109,6 +112,8 @@ def test_parse_http_probe_no_findings_on_clean_https_response():
             "X-Content-Type-Options": "nosniff",
             "X-Frame-Options": "DENY",
             "Content-Security-Policy": "default-src 'self'",
+            "Referrer-Policy": "no-referrer",
+            "Permissions-Policy": "geolocation=()",
         },
         "body": "<html>nothing interesting here</html>",
     }
@@ -162,3 +167,70 @@ def test_parse_postgres_roles_no_findings_when_none_overprivileged():
         }
     ]
     assert parse_postgres_roles("host-db-1", rows) == []
+
+
+def test_parse_tls_probe_flags_weak_protocol():
+    info = {
+        "port": 443,
+        "protocol": "TLSv1",
+        "verify_error": None,
+        "not_after": None,
+        "days_until_expiry": None,
+    }
+    findings = parse_tls_probe("legacy.lab.internal", info)
+    assert [f["type"] for f in findings] == ["weak_tls_protocol"]
+
+
+def test_parse_tls_probe_flags_expired_certificate():
+    info = {
+        "port": 443,
+        "protocol": "TLSv1.3",
+        "verify_error": None,
+        "not_after": "Jan  1 00:00:00 2020 GMT",
+        "days_until_expiry": -100,
+    }
+    findings = parse_tls_probe("stale.lab.internal", info)
+    assert findings[0]["type"] == "expired_certificate"
+    assert findings[0]["severity"] == "critical"
+
+
+def test_parse_tls_probe_clean_cert_no_findings():
+    info = {
+        "port": 443,
+        "protocol": "TLSv1.3",
+        "verify_error": None,
+        "not_after": "Jan  1 00:00:00 2099 GMT",
+        "days_until_expiry": 9000,
+    }
+    assert parse_tls_probe("fine.lab.internal", info) == []
+
+
+def test_parse_exposed_paths_flags_critical_but_not_benign():
+    hits = {
+        "/.git/HEAD": {"status_code": 200, "length": 23},
+        "/robots.txt": {"status_code": 200, "length": 10},
+    }
+    findings = parse_exposed_paths("https://app01.lab.internal", hits)
+    assert len(findings) == 1
+    assert findings[0]["type"] == "exposed_sensitive_path"
+    assert findings[0]["severity"] == "critical"
+
+
+def test_parse_cors_probe_flags_reflected_origin_with_credentials():
+    info = {
+        "allow_origin": "https://cors-probe.invalid.example",
+        "allow_credentials": "true",
+        "probe_origin": "https://cors-probe.invalid.example",
+    }
+    findings = parse_cors_probe("https://app01.lab.internal/api", info)
+    assert findings[0]["type"] == "cors_misconfiguration"
+    assert findings[0]["severity"] == "high"
+
+
+def test_parse_cors_probe_no_findings_when_origin_not_reflected():
+    info = {
+        "allow_origin": "https://trusted.example.com",
+        "allow_credentials": None,
+        "probe_origin": "https://cors-probe.invalid.example",
+    }
+    assert parse_cors_probe("https://app01.lab.internal/api", info) == []
