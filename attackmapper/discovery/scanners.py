@@ -79,7 +79,7 @@ def run_nmap_scan(target: str, ports: str = "1-1024", timeout: float = 120.0) ->
     return result.stdout
 
 
-def http_probe(url: str, timeout: float = 5.0) -> dict:
+def http_probe(url: str, timeout: float = 15.0) -> dict:
     """A single read-only GET against `url`. Returns the raw shape
     parsers.parse_http_probe needs: status code, headers, and body
     text (truncated so nothing downstream — storage, an LLM prompt —
