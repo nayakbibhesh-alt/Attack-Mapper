@@ -21,9 +21,12 @@ would print, as JSON, rather than crashing the server.
 
 from __future__ import annotations
 
+import base64
 import dataclasses
+import hmac
 import json
 import logging
+import os
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -35,6 +38,40 @@ from .graph import AttackGraph
 logger = logging.getLogger(__name__)
 
 WEB_DIR = Path(__file__).parent / "web"
+
+# Basic Auth, gated by two env vars so a Render deployment (or anyone
+# else exposing this over the open internet) can lock the whole UI —
+# every route, static file included — behind a single shared
+# credential. See main()'s startup banner for the un-set case: rather
+# than silently running open, it prints a loud warning every time the
+# server starts without these set, so "I forgot to set the env vars"
+# is never a silent mistake.
+AUTH_USER = os.environ.get("ATTACKMAPPER_AUTH_USER")
+AUTH_PASS = os.environ.get("ATTACKMAPPER_AUTH_PASS")
+AUTH_ENABLED = bool(AUTH_USER and AUTH_PASS)
+
+
+def _check_basic_auth(header_value: str | None) -> bool:
+    """Validate a raw `Authorization` header value against
+    AUTH_USER/AUTH_PASS. Returns True (nothing to check) when auth
+    isn't configured at all, matching the "off by default in dev,
+    opt-in for anything reachable over the network" posture — but note
+    main() refuses to silently pretend this is fine (see its startup
+    banner). Uses hmac.compare_digest on both the username and
+    password separately, rather than comparing the decoded "user:pass"
+    string in one shot, so a match on a correct username doesn't leak
+    partial timing information about the password via a single
+    combined comparison being marginally faster to fail on."""
+    if not AUTH_ENABLED:
+        return True
+    if not header_value or not header_value.startswith("Basic "):
+        return False
+    try:
+        decoded = base64.b64decode(header_value[len("Basic ") :]).decode("utf-8")
+        user, _, password = decoded.partition(":")
+    except Exception:
+        return False
+    return hmac.compare_digest(user, AUTH_USER) and hmac.compare_digest(password, AUTH_PASS)
 
 
 def jsonable(obj):
@@ -233,10 +270,13 @@ class Api:
         if not target:
             return 400, {"error": "target is required"}
         run_nmap = bool(body.get("run_nmap", True))
+        chain_findings = bool(body.get("chain_findings", True))
         from .discovery import pipeline
 
         try:
-            result = pipeline.scan_target_url(target, run_nmap=run_nmap)
+            result = pipeline.scan_target_url(
+                target, run_nmap=run_nmap, chain_findings=chain_findings
+            )
         except RuntimeError as exc:
             return 424, {"error": str(exc)}
 
@@ -254,8 +294,39 @@ class Api:
             "host_id": result["host_id"],
             "findings": findings,
             "paths": [serialize_path(p) for p in result["paths"]],
+            "subdomains": result.get("subdomains", []),
+            "chains": result.get("chains", []),
+            "chains_error": result.get("chains_error"),
             "errors": result["errors"],
         }
+
+    @staticmethod
+    def post_chain_findings(body):
+        """Standalone attack-chain reasoning, independent of a scan --
+        for re-running the analysis after storage.list_findings()
+        picked up more findings some other way (a raw nmap scan, the
+        discovery loop, a manually-interpreted piece of evidence)
+        without re-running every web probe. Optionally scoped to one
+        host_id; otherwise reasons over every finding currently in
+        storage."""
+        host_id = body.get("host_id")
+        from .narration import attack_chain_llm
+
+        findings = storage.list_findings()
+        hosts = storage.list_hosts()
+        services = storage.list_services()
+        if host_id:
+            findings = [f for f in findings if f["host_id"] == host_id]
+            hosts = [h for h in hosts if h["id"] == host_id]
+            services = [s for s in services if s["host_id"] == host_id]
+
+        try:
+            chains = attack_chain_llm.find_attack_chains(
+                findings=findings, hosts=hosts, services=services
+            )
+        except RuntimeError as exc:
+            return 424, {"error": str(exc)}
+        return 200, {"chains": chains, "findings_considered": len(findings)}
 
     @staticmethod
     def post_discover(body):
@@ -311,6 +382,7 @@ ROUTES_POST = {
     "/api/interpret-evidence": Api.post_interpret_evidence,
     "/api/scan-nmap": Api.post_scan_nmap,
     "/api/scan-url": Api.post_scan_url,
+    "/api/chain-findings": Api.post_chain_findings,
     "/api/discover": Api.post_discover,
     "/api/seed-demo": Api.post_seed_demo,
     "/api/reset": Api.post_reset,
@@ -339,7 +411,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _require_auth(self) -> bool:
+        """Returns True if the request may proceed. Otherwise sends the
+        401 challenge itself (so callers can just `return` on False)."""
+        if _check_basic_auth(self.headers.get("Authorization")):
+            return True
+        body = json.dumps({"error": "authentication required"}).encode("utf-8")
+        self.send_response(401)
+        self.send_header("WWW-Authenticate", 'Basic realm="AttackMapper"')
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return False
+
     def do_GET(self):
+        if not self._require_auth():
+            return
         parsed = urlsplit(self.path)
         qs = parse_qs(parsed.query)
 
@@ -359,6 +447,8 @@ class Handler(BaseHTTPRequestHandler):
         self._send_json(status, payload)
 
     def do_POST(self):
+        if not self._require_auth():
+            return
         parsed = urlsplit(self.path)
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length) if length else b"{}"
@@ -397,6 +487,16 @@ def main(host: str = "127.0.0.1", port: int = 8765, open_browser: bool = True) -
     url = f"http://{host}:{port}/"
     print(f"AttackMapper UI running at {url}  (Ctrl+C to stop)")
     print(f"Backend: {storage.describe_backend()}")
+    if AUTH_ENABLED:
+        print(f"Access control: Basic Auth required (user={AUTH_USER!r}).")
+    else:
+        print(
+            "*** WARNING: no ATTACKMAPPER_AUTH_USER/ATTACKMAPPER_AUTH_PASS "
+            "set -- every route (including /api/reset and every scan "
+            "endpoint) is reachable by anyone who can reach this address. "
+            "Fine for localhost-only use; set both env vars before "
+            "exposing this over a network. ***"
+        )
     print(
         "Scan a real target from the Hosts view (or `attackmapper scan-nmap`) "
         "to get started -- nothing is preloaded by default. Want the worked "

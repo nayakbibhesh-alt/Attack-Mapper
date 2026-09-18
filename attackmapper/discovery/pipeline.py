@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from .. import storage
 from ..graph import AttackGraph
 from ..models import Edge
+from ..narration import attack_chain_llm
 from . import evidence_llm, parsers, scanners
 
 
@@ -119,16 +120,25 @@ def ingest_ambiguous_evidence(
 def scan_target_url(
     target_url: str,
     run_nmap: bool = True,
-    nmap_ports: str = "21,22,25,80,443,3306,3389,5432,6379,8080,8443",
+    nmap_ports: str = scanners.COMMON_TARGET_PORTS,
+    chain_findings: bool = True,
 ) -> dict:
     """The one-box "give me a URL" entry point: runs every read-only
     web-facing probe this module has (HTTP headers/secrets, TLS,
-    exposed sensitive paths, CORS, and — if nmap is installed and not
-    disabled — a scan of a short list of common ports) against a
-    single target, persists everything through the same storage/graph
-    layers the CLI and other pipeline functions use, and returns the
-    resulting findings plus every attack path the deterministic graph
-    engine can currently trace from `external` to this host.
+    exposed sensitive paths, CORS, HTTP methods, GraphQL introspection,
+    open redirects, DNS/SPF/DMARC posture, certificate-transparency
+    subdomain discovery, unauthenticated-datastore checks, and — if
+    nmap is installed and not disabled — a port scan of a broad list of
+    commonly-exposed services) against a single target, persists
+    everything through the same storage/graph layers the CLI and other
+    pipeline functions use, and returns the resulting findings, every
+    attack path the deterministic graph engine can currently trace
+    from `external` to this host, discovered subdomains, and (when
+    `chain_findings` is True and at least two findings came out of this
+    scan) LLM-reasoned attack chains showing how the individual
+    findings combine into a realistic breach -- see
+    narration/attack_chain_llm.py for what that step does and why it's
+    on by default here rather than a separate manual action.
 
     Every probe here is read-only and unauthenticated-GET-only; this
     function does not attempt exploitation, brute-forcing, or anything
@@ -215,6 +225,58 @@ def scan_target_url(
     except RuntimeError as exc:
         errors.append(str(exc))
 
+    try:
+        methods_info = scanners.http_methods_probe(target_url)
+        for f in parsers.parse_http_methods(target_url, methods_info):
+            storage.save_finding({**f, "host_id": host_id})
+    except RuntimeError as exc:
+        errors.append(str(exc))
+
+    try:
+        graphql_info = scanners.graphql_introspection_probe(base_url)
+        for f in parsers.parse_graphql_probe(graphql_info):
+            storage.save_finding({**f, "host_id": host_id})
+    except RuntimeError as exc:
+        errors.append(str(exc))
+
+    try:
+        redirect_info = scanners.open_redirect_probe(base_url)
+        for f in parsers.parse_open_redirect(base_url, redirect_info):
+            storage.save_finding({**f, "host_id": host_id})
+    except RuntimeError as exc:
+        errors.append(str(exc))
+
+    # DNS posture (SPF/DMARC) -- best-effort: dns_probe never raises
+    # (see its docstring), an absent/broken answer is itself the
+    # finding, so there's no RuntimeError path to catch here.
+    dns_info = scanners.dns_probe(hostname)
+    for f in parsers.parse_dns_probe(hostname, dns_info):
+        storage.save_finding({**f, "host_id": host_id})
+
+    # Certificate-transparency subdomain discovery -- also best-effort
+    # (subdomain_enum returns [] rather than raising on failure).
+    # Returned separately in the result dict (it's reconnaissance
+    # about the wider domain, not this one host), plus turned into
+    # low-confidence findings for any subdomain whose name itself
+    # looks sensitive.
+    subdomains = scanners.subdomain_enum(hostname)
+    for f in parsers.parse_subdomains(hostname, subdomains):
+        storage.save_finding({**f, "host_id": host_id})
+
+    # Unauthenticated-datastore checks. These try fixed well-known
+    # ports directly against the resolved IP rather than waiting on
+    # nmap's results, so they still run even with run_nmap=False, and
+    # each is a single short-timeout connection attempt that no-ops
+    # to {"open": False} when nothing is listening.
+    for service_name, probe_fn, port in (
+        ("redis", scanners.redis_unauth_probe, 6379),
+        ("memcached", scanners.memcached_unauth_probe, 11211),
+        ("elasticsearch", scanners.elasticsearch_unauth_probe, 9200),
+    ):
+        info = probe_fn(ip, port)
+        for f in parsers.parse_unauth_datastore(service_name, ip, port, info):
+            storage.save_finding({**f, "host_id": host_id})
+
     if run_nmap and shutil.which("nmap"):
         try:
             xml_text = scanners.run_nmap_scan(ip, ports=nmap_ports, timeout=90.0)
@@ -244,6 +306,22 @@ def scan_target_url(
     paths = graph.find_all_paths("external", host_id)
     ranked_paths = sorted(paths, key=AttackGraph.path_confidence, reverse=True)
 
+    chains: list[dict] = []
+    chains_error: str | None = None
+    if chain_findings:
+        try:
+            chains = attack_chain_llm.find_attack_chains(
+                findings=findings,
+                hosts=[h for h in storage.list_hosts() if h["id"] == host_id],
+                services=[s for s in storage.list_services() if s["host_id"] == host_id],
+            )
+        except RuntimeError as exc:
+            # Same contract as every other LLM-backed step in this
+            # codebase (missing OPENROUTER_API_KEY, etc.): don't fail
+            # the whole scan over it, surface it as an error the
+            # caller can show, and return an empty chain list.
+            chains_error = str(exc)
+
     return {
         "target": target_url,
         "hostname": hostname,
@@ -251,5 +329,8 @@ def scan_target_url(
         "host_id": host_id,
         "findings": findings,
         "paths": ranked_paths,
+        "subdomains": subdomains,
+        "chains": chains,
+        "chains_error": chains_error,
         "errors": errors,
     }

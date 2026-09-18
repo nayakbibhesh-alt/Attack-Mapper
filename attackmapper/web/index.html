@@ -151,6 +151,26 @@
   .findings-mini .finding{padding:10px 12px;margin-bottom:6px;}
   .findings-mini .finding-title{font-size:12.5px;}
   .findings-mini .finding-desc{font-size:12px;}
+
+  .chain{background:var(--bg-panel);border:1px solid var(--border);border-radius:var(--radius);padding:16px 18px;margin-bottom:12px;}
+  .chain-top{display:flex;align-items:flex-start;gap:10px;justify-content:space-between;}
+  .chain-title{font-weight:600;font-size:14px;}
+  .chain-steps{margin:12px 0 0 0;padding:0;list-style:none;counter-reset:chainstep;}
+  .chain-step{counter-increment:chainstep;position:relative;padding:2px 0 10px 30px;font-size:13px;color:var(--text);}
+  .chain-step::before{content:counter(chainstep);position:absolute;left:0;top:1px;width:20px;height:20px;border-radius:50%;background:var(--accent-soft);color:var(--accent);font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;}
+  .chain-step::after{content:'';position:absolute;left:9px;top:22px;bottom:-2px;width:1px;background:var(--border);}
+  .chain-step:last-child::after{display:none;}
+  .chain-step-based{margin-top:2px;font-size:11px;color:var(--text-dim);font-family:ui-monospace,monospace;}
+  .chain-impact,.chain-remedy{margin-top:10px;font-size:13px;padding:10px 12px;border-radius:var(--radius-sm);}
+  .chain-impact{background:var(--crit-bg);color:#7A1D17;}
+  .chain-remedy{background:var(--ok-bg);color:#2C5A3D;}
+  .chain-impact b,.chain-remedy b{color:inherit;}
+
+  .subdomain-list{display:flex;flex-wrap:wrap;gap:6px;}
+  .subdomain-chip{padding:4px 10px;border-radius:20px;font-size:12px;background:var(--bg-soft);border:1px solid var(--border);font-family:ui-monospace,monospace;}
+  .subdomain-chip.sensitive{background:var(--med-bg);color:var(--med);border-color:transparent;}
+
+  .edge-confirm-btn{margin-left:8px;padding:1px 8px;font-size:10.5px;border-radius:20px;border:1px solid var(--accent-line);background:var(--accent-soft);color:var(--accent);font-weight:600;cursor:pointer;}
 </style>
 </head>
 <body>
@@ -178,7 +198,7 @@
     <section class="view" id="tab-scan">
       <div class="hero">
         <h1>Scan a target</h1>
-        <p>Give AttackMapper a URL. It runs a read-only recon pass — HTTP headers, TLS, exposed paths, CORS, and an optional nmap sweep of common ports — and reports vulnerabilities, the attack path from the internet in, and a remedy for each finding.</p>
+        <p>Give AttackMapper a URL. It runs a read-only recon pass — HTTP headers, TLS, exposed paths, CORS, dangerous HTTP methods, GraphQL introspection, open redirects, DNS/SPF/DMARC posture, subdomain discovery, unauthenticated-datastore checks, and an optional nmap sweep — then reports vulnerabilities, an LLM-reasoned attack chain showing how they combine into a real breach, the attack path from the internet in, and a remedy for each finding.</p>
       </div>
 
       <div class="scan-box">
@@ -188,8 +208,9 @@
         </div>
         <div class="scan-opts">
           <label><input type="checkbox" id="runNmap" checked> include nmap port scan</label>
+          <label><input type="checkbox" id="chainFindings" checked> chain findings into attack scenarios</label>
         </div>
-        <div class="scope-note">Only point this at a target you own or are explicitly authorized to test. AttackMapper never attempts exploitation — every probe is a read-only GET, TLS handshake, or TCP connect/version scan.</div>
+        <div class="scope-note">Only point this at a target you own or are explicitly authorized to test. AttackMapper never attempts exploitation — every probe is a read-only GET, TLS handshake, DNS lookup, protocol greeting, or TCP connect/version scan.</div>
         <div class="status-line" id="scanStatus"><span class="spinner"></span><span id="scanStatusText">Scanning…</span></div>
       </div>
 
@@ -199,13 +220,19 @@
           <div class="target-meta" id="resultMeta"></div>
         </div>
         <div class="summary-chips" id="summaryChips"></div>
+        <div id="subdomainsBlock" style="display:none;margin-bottom:22px;">
+          <div class="block-head"><h3>Subdomains discovered</h3><span class="count" id="subdomainsCount"></span></div>
+          <div class="subdomain-list" id="subdomainsList"></div>
+        </div>
 
         <div class="tabs-sub">
           <div class="tab-sub active" data-sub="vulns">Vulnerabilities &amp; remedies</div>
+          <div class="tab-sub" data-sub="chains">Attack chains</div>
           <div class="tab-sub" data-sub="paths">Attack paths</div>
         </div>
 
         <section class="block" id="subVulns"></section>
+        <section class="block" id="subChains" style="display:none;"></section>
         <section class="block" id="subPaths" style="display:none;"></section>
       </div>
     </section>
@@ -213,6 +240,26 @@
     <!-- ===================== INVENTORY TAB ===================== -->
     <section class="view" id="tab-inventory" style="display:none;">
       <div class="hero"><h1>Inventory</h1><p>Everything discovered so far, across every scan run this session.</p></div>
+
+      <div class="panel">
+        <h3>Relationship inference</h3>
+        <p class="hint">Asks the LLM to propose host-to-host relationships (CAN_REACH, RUNS_AS, etc.) from the findings/services in inventory. Proposed edges appear unconfirmed on the Graph tab until reviewed.</p>
+        <div class="field-row">
+          <button class="btn secondary small" id="inferBtn">Infer relationships</button>
+          <label><input type="checkbox" id="inferCompare"> compare against already-confirmed edges</label>
+        </div>
+        <div id="inferResult"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Attack chain analysis</h3>
+        <p class="hint">Re-runs the same attack-chain reasoning a scan does automatically, over every finding currently in inventory (or just one host) — useful after inferring relationships or adding findings via a raw nmap scan or interpreted evidence.</p>
+        <div class="field-row">
+          <input type="text" id="chainHostFilter" placeholder="host_id (optional — leave blank for all hosts)" style="flex:1;min-width:220px;">
+          <button class="btn secondary small" id="chainAnalyzeBtn">Analyze findings</button>
+        </div>
+        <div id="chainAnalyzeResult"></div>
+      </div>
 
       <section class="block">
         <div class="block-head"><h3>Hosts</h3><button class="btn secondary small" id="refreshInventory">Refresh</button></div>
@@ -300,6 +347,35 @@
       </div>
 
       <div class="panel">
+        <h3>Interpret ambiguous evidence</h3>
+        <p class="hint">Hands a piece of free-text evidence (a log line, a config snippet, a support ticket) to the LLM and asks it to turn that into structured findings/relationships against a specific host.</p>
+        <div class="field-row">
+          <input type="text" id="evidenceHostId" placeholder="host_id" style="width:200px;">
+          <input type="text" id="evidenceType" placeholder="evidence type, e.g. log_line, config_snippet" style="flex:1;min-width:200px;">
+        </div>
+        <div class="field-row">
+          <textarea id="evidenceText" placeholder="Paste the evidence text here…" rows="3" style="flex:1;width:100%;padding:9px 11px;border:1px solid var(--border);border-radius:6px;font-size:13px;background:var(--bg);"></textarea>
+        </div>
+        <div class="field-row">
+          <button class="btn secondary small" id="evidenceBtn">Interpret</button>
+        </div>
+        <div id="evidenceResult"></div>
+      </div>
+
+      <div class="panel">
+        <h3>Analyze a path</h3>
+        <p class="hint">Runs the same path-finding <code>attackmapper analyze</code> uses between any two node ids in the graph, optionally narrated in plain English.</p>
+        <div class="field-row">
+          <input type="text" id="analyzeStart" placeholder="start node id, e.g. external" value="external" style="width:200px;">
+          <input type="text" id="analyzeTarget" placeholder="target node id" style="width:200px;">
+          <label><input type="checkbox" id="analyzeIncludeUnconfirmed"> include unconfirmed edges</label>
+          <label><input type="checkbox" id="analyzeNarrate"> narrate top path</label>
+          <button class="btn secondary small" id="analyzeBtn">Run</button>
+        </div>
+        <div id="analyzeResult"></div>
+      </div>
+
+      <div class="panel">
         <h3>Demo data &amp; reset</h3>
         <div class="field-row">
           <button class="btn secondary small" id="seedBtn">Load demo network</button>
@@ -342,6 +418,7 @@ $$('.tab-sub').forEach(t => t.addEventListener('click', () => {
   t.classList.add('active');
   const sub = t.dataset.sub;
   $('#subVulns').style.display = sub === 'vulns' ? '' : 'none';
+  $('#subChains').style.display = sub === 'chains' ? '' : 'none';
   $('#subPaths').style.display = sub === 'paths' ? '' : 'none';
 }));
 
@@ -406,6 +483,47 @@ function renderPaths(paths, hostname) {
   }).join('');
 }
 
+// An attack chain shows the LLM's reasoning for how 2+ individually-
+// modest findings combine into a real breach — the "chains, doesn't
+// just list vulnerabilities" behavior the Scan tab promises. Reused
+// by both the automatic per-scan result and the standalone
+// "Analyze all findings" panel in Inventory.
+function renderChains(chains, chainsError) {
+  if (chainsError) {
+    return `<div class="empty">Attack chain analysis unavailable: ${esc(chainsError)}</div>`;
+  }
+  if (!chains || !chains.length) {
+    return `<div class="empty">No findings combined into a worse attack chain this pass — either too few findings, or none of them compound each other.</div>`;
+  }
+  return chains.map(c => `
+    <div class="chain">
+      <div class="chain-top">
+        <div class="chain-title">${esc(c.title)}</div>
+        <span class="sev-badge ${esc(c.severity)}">${esc(SEV_LABEL[c.severity]||c.severity)}</span>
+      </div>
+      <ol class="chain-steps">
+        ${(c.steps||[]).map(s => `
+          <li class="chain-step">
+            ${esc(s.action)}
+            ${s.based_on ? `<div class="chain-step-based">based on finding ${esc(s.based_on)}</div>` : ''}
+          </li>
+        `).join('')}
+      </ol>
+      ${c.impact ? `<div class="chain-impact"><b>Impact —</b> ${esc(c.impact)}</div>` : ''}
+      ${c.remediation ? `<div class="chain-remedy"><b>Remediation —</b> ${esc(c.remediation)}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+function renderSubdomains(subdomains) {
+  const sensitiveHints = ['dev','stage','staging','test','uat','qa','internal','intranet','admin','adminer','phpmyadmin','jenkins','gitlab','git','grafana','kibana','prometheus','vpn','backup','db','database','sftp','ftp','old','legacy','beta'];
+  return subdomains.map(s => {
+    const label = s.split('.')[0] || s;
+    const sensitive = sensitiveHints.some(h => label.split('-').includes(h));
+    return `<span class="subdomain-chip${sensitive ? ' sensitive' : ''}">${esc(s)}</span>`;
+  }).join('');
+}
+
 // ---------- scan ----------
 async function runScan() {
   const target = $('#targetInput').value.trim();
@@ -416,12 +534,24 @@ async function runScan() {
   $('#scanStatusText').textContent = 'Scanning ' + target + ' — this can take up to a minute…';
   $('#results').classList.remove('show');
   try {
-    const result = await api('POST', '/api/scan-url', {target, run_nmap: $('#runNmap').checked});
+    const result = await api('POST', '/api/scan-url', {
+      target,
+      run_nmap: $('#runNmap').checked,
+      chain_findings: $('#chainFindings').checked,
+    });
     $('#resultTarget').textContent = result.target;
     $('#resultMeta').textContent = `${result.hostname} → ${result.ip}`;
     $('#summaryChips').innerHTML = renderChips(result.findings);
     $('#subVulns').innerHTML = renderFindings(result.findings);
+    $('#subChains').innerHTML = renderChains(result.chains, result.chains_error);
     $('#subPaths').innerHTML = renderPaths(result.paths, result.hostname);
+    if (result.subdomains && result.subdomains.length) {
+      $('#subdomainsBlock').style.display = '';
+      $('#subdomainsCount').textContent = `${result.subdomains.length} found`;
+      $('#subdomainsList').innerHTML = renderSubdomains(result.subdomains);
+    } else {
+      $('#subdomainsBlock').style.display = 'none';
+    }
     if (result.errors && result.errors.length) {
       $('#subVulns').innerHTML += `<div class="empty">${result.errors.map(esc).join('<br>')}</div>`;
     }
@@ -429,7 +559,9 @@ async function runScan() {
   } catch (e) {
     $('#results').classList.add('show');
     $('#subVulns').innerHTML = `<div class="empty">Scan failed: ${esc(e.message)}</div>`;
+    $('#subChains').innerHTML = '';
     $('#subPaths').innerHTML = '';
+    $('#subdomainsBlock').style.display = 'none';
     $('#summaryChips').innerHTML = '';
     $('#resultTarget').textContent = target;
     $('#resultMeta').textContent = '';
@@ -463,6 +595,42 @@ async function loadInventory() {
   }
 }
 $('#refreshInventory').addEventListener('click', loadInventory);
+
+// ---------- inventory: relationship inference ----------
+$('#inferBtn').addEventListener('click', async () => {
+  const compare = $('#inferCompare').checked;
+  $('#inferResult').innerHTML = '<div class="empty">Inferring relationships…</div>';
+  try {
+    const result = await api('POST', '/api/infer', {compare});
+    const proposed = result.proposed || [];
+    let html = proposed.length ? `
+      <table style="margin-top:10px;"><thead><tr><th>Source</th><th>Relationship</th><th>Target</th><th>Confidence</th></tr></thead>
+      <tbody>${proposed.map(e => `<tr><td class="mono">${esc(e.source)}</td><td>${esc(e.relationship)}</td><td class="mono">${esc(e.target)}</td><td>${(e.confidence??0).toFixed(2)}</td></tr>`).join('')}</tbody></table>
+    ` : '<div class="empty">No relationships proposed from the current inventory.</div>';
+    if (compare && result.comparison) {
+      html += `<pre class="mono" style="white-space:pre-wrap;font-size:11.5px;background:var(--bg-inset);padding:10px;border-radius:6px;margin-top:10px;">${esc(JSON.stringify(result.comparison, null, 2))}</pre>`;
+    }
+    $('#inferResult').innerHTML = html;
+    loadGraph();
+  } catch (e) {
+    $('#inferResult').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+});
+
+// ---------- inventory: standalone attack chain analysis ----------
+$('#chainAnalyzeBtn').addEventListener('click', async () => {
+  const hostId = $('#chainHostFilter').value.trim();
+  $('#chainAnalyzeResult').innerHTML = '<div class="empty">Analyzing…</div>';
+  try {
+    const result = await api('POST', '/api/chain-findings', hostId ? {host_id: hostId} : {});
+    $('#chainAnalyzeResult').innerHTML = `
+      <div style="font-size:12px;color:var(--text-dim);margin:10px 0;">${result.findings_considered} finding(s) considered.</div>
+      ${renderChains(result.chains)}
+    `;
+  } catch (e) {
+    $('#chainAnalyzeResult').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+});
 
 // ---------- graph ----------
 const NODE_COLOR = {external:'#6B6459', host:'#C1622D', account:'#96700A', asset:'#B3261E'};
@@ -597,7 +765,7 @@ function selectGraphNode(id) {
 
   const outgoing = edges.filter(e => e.source === id);
   const incoming = edges.filter(e => e.target === id);
-  const fmtEdge = e => `<div style="margin-bottom:4px;font-size:12.5px;">${e.confirmed ? '' : '<span style="color:var(--accent);">(unconfirmed) </span>'}${esc(e.relationship)} — <span class="mono">${esc(e.source === id ? e.target : e.source)}</span></div>`;
+  const fmtEdge = e => `<div style="margin-bottom:4px;font-size:12.5px;">${e.confirmed ? '' : '<span style="color:var(--accent);">(unconfirmed) </span>'}${esc(e.relationship)} — <span class="mono">${esc(e.source === id ? e.target : e.source)}</span>${(!e.confirmed && e.id) ? `<button class="edge-confirm-btn" data-edge-id="${esc(e.id)}">Confirm</button>` : ''}</div>`;
 
   $('#graphInfo').innerHTML = `
     <h3 style="margin-bottom:2px;">${esc(node.label || node.id)}</h3>
@@ -606,6 +774,18 @@ function selectGraphNode(id) {
     ${incoming.length ? `<div style="font-size:11.5px;color:var(--text-mid);font-weight:600;margin:${outgoing.length ? '12px' : '0'} 0 6px;">Reached by</div>${incoming.map(fmtEdge).join('')}` : ''}
     ${(!outgoing.length && !incoming.length) ? '<div class="empty" style="padding:12px;">No edges for this node yet.</div>' : ''}
   `;
+
+  $$('.edge-confirm-btn', $('#graphInfo')).forEach(btn => btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    btn.textContent = '…';
+    try {
+      await api('POST', `/api/relationships/${encodeURIComponent(btn.dataset.edgeId)}/confirm`, {});
+      await loadGraph();
+      selectGraphNode(id);
+    } catch (e) {
+      btn.textContent = 'Failed';
+    }
+  }));
 }
 
 async function loadGraph() {
@@ -672,6 +852,51 @@ $('#discoverBtn').addEventListener('click', async () => {
     $('#discoverResult').innerHTML = `<pre class="mono" style="white-space:pre-wrap;font-size:11.5px;background:var(--bg-inset);padding:10px;border-radius:6px;">${esc(JSON.stringify(result, null, 2))}</pre>`;
   } catch (e) {
     $('#discoverResult').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+});
+
+// ---------- advanced: interpret evidence ----------
+$('#evidenceBtn').addEventListener('click', async () => {
+  const host_id = $('#evidenceHostId').value.trim();
+  const evidence_type = $('#evidenceType').value.trim();
+  const text = $('#evidenceText').value.trim();
+  if (!host_id || !evidence_type || !text) {
+    $('#evidenceResult').innerHTML = '<div class="empty">host_id, evidence type, and text are all required.</div>';
+    return;
+  }
+  $('#evidenceResult').innerHTML = '<div class="empty">Interpreting…</div>';
+  try {
+    const result = await api('POST', '/api/interpret-evidence', {host_id, evidence_type, text});
+    $('#evidenceResult').innerHTML = `<pre class="mono" style="white-space:pre-wrap;font-size:11.5px;background:var(--bg-inset);padding:10px;border-radius:6px;">${esc(JSON.stringify(result, null, 2))}</pre>`;
+  } catch (e) {
+    $('#evidenceResult').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
+  }
+});
+
+// ---------- advanced: analyze a path ----------
+$('#analyzeBtn').addEventListener('click', async () => {
+  const start = $('#analyzeStart').value.trim();
+  const target = $('#analyzeTarget').value.trim();
+  if (!start || !target) {
+    $('#analyzeResult').innerHTML = '<div class="empty">Both a start and a target node id are required.</div>';
+    return;
+  }
+  $('#analyzeResult').innerHTML = '<div class="empty">Analyzing…</div>';
+  try {
+    const result = await api('POST', '/api/analyze', {
+      start, target,
+      min_confidence: $('#analyzeIncludeUnconfirmed').checked ? 0.0 : 1.0,
+      narrate: $('#analyzeNarrate').checked,
+    });
+    let html = renderPaths(result.paths || [], target);
+    if (result.narration) {
+      html += `<div class="ask-answer" style="margin-top:14px;">${esc(result.narration)}</div>`;
+    } else if (result.narration_error) {
+      html += `<div class="empty">Narration unavailable: ${esc(result.narration_error)}</div>`;
+    }
+    $('#analyzeResult').innerHTML = html;
+  } catch (e) {
+    $('#analyzeResult').innerHTML = `<div class="empty">Error: ${esc(e.message)}</div>`;
   }
 });
 

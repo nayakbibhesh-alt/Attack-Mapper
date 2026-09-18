@@ -47,11 +47,15 @@ def test_ingest_nmap_xml_stores_findings_from_synthetic_fixture(fresh_store):
 
     assert summary["hosts"] == 1
     assert summary["services"] == 2
-    assert summary["findings"] == 2  # vsftpd backdoor + old OpenSSH
+    # vsftpd backdoor + old OpenSSH + the generic "sensitive port
+    # exposed" finding for FTP (parsers.SENSITIVE_PORTS) firing
+    # alongside the specific backdoor finding for the same port.
+    assert summary["findings"] == 3
 
     findings = fresh_store.list_findings()
     assert all(f["host_id"] for f in findings)  # ip was resolved to host_id
     assert all("ip" not in f for f in findings)  # internal key not leaked
+    assert any(f["type"] == "sensitive_port_exposed" for f in findings)
 
 
 def test_ingest_nmap_xml_rescanning_same_ip_updates_not_duplicates(fresh_store):

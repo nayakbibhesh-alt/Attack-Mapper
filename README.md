@@ -139,6 +139,26 @@ export ATTACKMAPPER_STORAGE=memory
 export ATTACKMAPPER_SEED_DEMO=1
 ```
 
+### Access control: Basic Auth (set this before exposing `serve` on a network)
+
+`attackmapper serve` has **no authentication at all** unless you set
+both of these — every route, including `/api/reset` (wipes the store)
+and every scan endpoint (which makes real outbound requests on your
+behalf), is open to anyone who can reach the address:
+
+```bash
+export ATTACKMAPPER_AUTH_USER=admin
+export ATTACKMAPPER_AUTH_PASS='use a real secret here'
+```
+
+`serve` prints a loud warning banner at startup if these aren't set,
+so running open is never a silent default. Fine for `127.0.0.1`-only
+local use; required before deploying behind a public URL (Render,
+etc.). Basic Auth over plain HTTP sends the password in a trivially
+reversible encoding, not encrypted — put this behind TLS (Render's
+default `*.onrender.com` domains already terminate TLS for you)
+before relying on it over an untrusted network.
+
 ### Point it at a real target
 
 ```bash

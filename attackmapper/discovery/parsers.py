@@ -65,6 +65,39 @@ _VERSION_RE = re.compile(r"\d+\.\d+")
 # Deprecated/weak TLS versions worth an automatic finding.
 WEAK_TLS_VERSIONS = {"SSLv2", "SSLv3", "TLSv1", "TLSv1.1"}
 
+# Well-known TCP ports that should almost never be reachable from the
+# public internet unauthenticated -- flagged purely from the port
+# being open, independent of whatever banner nmap did or didn't grab.
+# Maps port -> (severity, human label). Kept here (not in scanners.py)
+# since this is classification, exactly like KNOWN_VULNERABLE_BANNERS
+# above -- scanners.py stays limited to "how to reach the network."
+SENSITIVE_PORTS: dict[int, tuple[str, str]] = {
+    21: ("medium", "FTP (often anonymous-auth or cleartext credentials)"),
+    23: ("high", "Telnet (cleartext remote administration)"),
+    445: ("medium", "SMB (frequent lateral-movement / ransomware vector)"),
+    1433: ("high", "Microsoft SQL Server"),
+    1521: ("high", "Oracle database listener"),
+    2375: ("critical", "Docker Engine API without TLS (unauthenticated = host takeover)"),
+    2379: ("high", "etcd client API (often unauthenticated; stores cluster secrets)"),
+    3306: ("high", "MySQL/MariaDB"),
+    3389: ("medium", "RDP (common ransomware entry point)"),
+    5432: ("high", "PostgreSQL"),
+    5601: ("medium", "Kibana (frequently unauthenticated by default)"),
+    5672: ("medium", "RabbitMQ AMQP"),
+    5900: ("high", "VNC (often unauthenticated or weak-auth remote desktop)"),
+    6379: ("high", "Redis (frequently deployed with no authentication)"),
+    6443: ("high", "Kubernetes API server"),
+    8009: ("high", "AJP (Apache JServ Protocol -- Ghostcat-class request smuggling)"),
+    9042: ("medium", "Cassandra"),
+    9092: ("medium", "Kafka broker"),
+    9200: ("high", "Elasticsearch (frequently unauthenticated by default)"),
+    9300: ("medium", "Elasticsearch transport"),
+    11211: ("medium", "Memcached (frequently unauthenticated; also a DDoS amplifier)"),
+    15672: ("medium", "RabbitMQ management UI"),
+    27017: ("high", "MongoDB (frequently unauthenticated by default)"),
+    27018: ("high", "MongoDB (sharded cluster)"),
+}
+
 # Sensitive-path exposure: split into "always worth flagging" (VCS
 # dirs, secrets, backups) vs. paths that are normal/expected to be
 # public and shouldn't generate a finding just for existing.
@@ -241,6 +274,32 @@ def parse_nmap_xml(xml_text: str) -> tuple[list[dict], list[dict], list[dict]]:
                             "confidence": 1.0,
                         }
                     )
+
+            # Port-level exposure, independent of any banner: some
+            # services should essentially never be directly reachable
+            # from the public internet at all, regardless of whether
+            # they turn out to require auth once you're on them. See
+            # scanners.SENSITIVE_PORTS for the full table + rationale
+            # per port.
+            sensitive = SENSITIVE_PORTS.get(portid)
+            if sensitive:
+                severity, label = sensitive
+                findings.append(
+                    {
+                        "ip": ip,
+                        "type": "sensitive_port_exposed",
+                        "severity": severity,
+                        "description": (
+                            f"Port {portid}/{protocol} ({label}) is reachable "
+                            f"on {ip} — this class of service is a common "
+                            "target for direct exploitation or credential-"
+                            "less access once discovered by a port scan."
+                        ),
+                        "evidence": f"nmap found port {portid}/{protocol} open on {ip}",
+                        "source": "scanner",
+                        "confidence": 1.0,
+                    }
+                )
 
     return hosts, services, findings
 
@@ -579,3 +638,237 @@ def parse_postgres_roles(host_id: str, rows: list[dict]) -> list[dict]:
                 }
             )
     return findings
+
+
+# ---------------------------------------------------------------------
+# Phase H additions -- parsers for the new discovery sources in
+# scanners.py. Same rules as everything above: pure functions, no
+# network, no host_id yet unless noted (caller fills that in, same
+# convention as parse_http_probe/parse_tls_probe).
+# ---------------------------------------------------------------------
+
+
+def parse_dns_probe(hostname: str, info: dict) -> list[dict]:
+    """Turn a scanners.dns_probe() result into finding dicts. Absence
+    of SPF/DMARC isn't an exploitable vulnerability in the traditional
+    sense, but it's real, commonly-abused exposure: it's what makes a
+    domain trivially easy to spoof for phishing, which Layer 7's
+    attack-chain reasoning can combine with other findings (e.g. an
+    exposed employee email format) into a concrete social-engineering
+    path."""
+    findings: list[dict] = []
+    domain = info.get("domain", hostname)
+
+    if not info.get("spf_record"):
+        findings.append(
+            {
+                "type": "missing_spf_record",
+                "severity": "medium",
+                "description": (
+                    f"{domain} has no SPF (Sender Policy Framework) TXT "
+                    "record, making it easier for attackers to send "
+                    "phishing email that appears to come from this domain"
+                ),
+                "evidence": f"no TXT record starting 'v=spf1' found for {domain}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+
+    dmarc = info.get("dmarc_record")
+    if not dmarc:
+        findings.append(
+            {
+                "type": "missing_dmarc_record",
+                "severity": "medium",
+                "description": (
+                    f"{domain} has no DMARC record, so mail servers have no "
+                    "policy to consult when a message claiming to be from "
+                    "this domain fails SPF/DKIM"
+                ),
+                "evidence": f"no TXT record found at _dmarc.{domain}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+    elif info.get("dmarc_policy") == "none":
+        findings.append(
+            {
+                "type": "weak_dmarc_policy",
+                "severity": "low",
+                "description": (
+                    f"{domain}'s DMARC policy is 'p=none' -- failing "
+                    "messages are only reported, never quarantined or "
+                    "rejected"
+                ),
+                "evidence": f"_dmarc.{domain} TXT record: {dmarc}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+
+    return findings
+
+
+# Subdomain name fragments that, if discovered via certificate-
+# transparency logs, suggest an internal/administrative system that
+# was probably never meant to be publicly indexed in the first place.
+_SENSITIVE_SUBDOMAIN_HINTS = (
+    "dev", "stage", "staging", "test", "uat", "qa", "internal", "intranet",
+    "admin", "adminer", "phpmyadmin", "jenkins", "gitlab", "git",
+    "grafana", "kibana", "prometheus", "vpn", "backup", "db", "database",
+    "sftp", "ftp", "old", "legacy", "beta",
+)
+
+
+def parse_subdomains(domain: str, subdomains: list[str]) -> list[dict]:
+    """Not every discovered subdomain is a finding -- most are exactly
+    what you'd expect (www, api, mail). This flags the subset whose
+    name suggests an internal/admin/staging system that a certificate-
+    transparency log has now made public knowledge, which is itself
+    useful attacker recon even before anyone probes it."""
+    findings: list[dict] = []
+    for sub in subdomains:
+        label = sub.split(".")[0] if sub != domain else None
+        if not label:
+            continue
+        if any(hint == part for part in label.split("-") for hint in _SENSITIVE_SUBDOMAIN_HINTS):
+            findings.append(
+                {
+                    "type": "sensitive_subdomain_exposed",
+                    "severity": "low",
+                    "description": (
+                        f"Certificate transparency logs reveal {sub}, whose "
+                        "name suggests an internal, administrative, or "
+                        "non-production system -- worth checking that it "
+                        "isn't reachable, or isn't meant to be public"
+                    ),
+                    "evidence": f"crt.sh certificate transparency log lists {sub}",
+                    "source": "scanner",
+                    "confidence": 0.6,
+                }
+            )
+    return findings
+
+
+def parse_http_methods(url: str, info: dict) -> list[dict]:
+    """Turn a scanners.http_methods_probe() result into finding dicts.
+    TRACE enables cross-site tracing/header-reflection attacks; PUT/
+    DELETE accepted at the application root suggests write methods
+    were left enabled without access control in front of them."""
+    findings: list[dict] = []
+    methods = set(info.get("methods", []))
+
+    if "TRACE" in methods:
+        findings.append(
+            {
+                "type": "http_trace_enabled",
+                "severity": "medium",
+                "description": (
+                    f"{url} accepts the HTTP TRACE method, which can be "
+                    "used for cross-site tracing (XST) to read headers "
+                    "(e.g. cookies) a script shouldn't have access to"
+                ),
+                "evidence": f"OPTIONS {url} -> Allow: {', '.join(sorted(methods))}",
+                "source": "scanner",
+                "confidence": 1.0,
+            }
+        )
+
+    write_methods = methods & {"PUT", "DELETE"}
+    if write_methods:
+        findings.append(
+            {
+                "type": "dangerous_http_methods_enabled",
+                "severity": "high",
+                "description": (
+                    f"{url} advertises {', '.join(sorted(write_methods))} "
+                    "as accepted methods -- if these aren't gated by "
+                    "authentication, they allow direct content modification "
+                    "or deletion"
+                ),
+                "evidence": f"OPTIONS {url} -> Allow: {', '.join(sorted(methods))}",
+                "source": "scanner",
+                "confidence": 0.7,
+            }
+        )
+
+    return findings
+
+
+def parse_graphql_probe(info: dict) -> list[dict]:
+    """Turn a scanners.graphql_introspection_probe() result into a
+    finding. Introspection isn't itself a breach, but it hands an
+    attacker the complete schema -- every type, field, and mutation --
+    which is normally the single most time-consuming part of attacking
+    a GraphQL API."""
+    if not info.get("introspection_enabled"):
+        return []
+    endpoint = info.get("endpoint")
+    return [
+        {
+            "type": "graphql_introspection_enabled",
+            "severity": "medium",
+            "description": (
+                f"GraphQL introspection is enabled at {endpoint}, exposing "
+                "the complete schema (types, fields, mutations) to any "
+                "unauthenticated caller"
+            ),
+            "evidence": f"POST {endpoint} with an introspection query returned a full __schema",
+            "source": "scanner",
+            "confidence": 1.0,
+        }
+    ]
+
+
+def parse_open_redirect(url: str, info: dict) -> list[dict]:
+    """Turn a scanners.open_redirect_probe() result into a finding.
+    Open redirects are commonly chained into phishing (a link that
+    starts on the real domain, then bounces to an attacker's page) and
+    into OAuth token theft."""
+    params = info.get("vulnerable_params", [])
+    if not params:
+        return []
+    return [
+        {
+            "type": "open_redirect",
+            "severity": "medium",
+            "description": (
+                f"{url} redirects to an attacker-controlled URL via the "
+                f"{', '.join(params)} parameter without validating it stays "
+                "on-site -- commonly abused to make phishing links look "
+                "like they start on a trusted domain"
+            ),
+            "evidence": f"GET {url}?{params[0]}=<external URL> returned a redirect to that URL",
+            "source": "scanner",
+            "confidence": 0.8,
+        }
+    ]
+
+
+def parse_unauth_datastore(
+    service: str, host: str, port: int, info: dict
+) -> list[dict]:
+    """Shared shape for the three unauthenticated-datastore probes
+    (Redis, Memcached, Elasticsearch) -- each returns
+    {"open": bool, "unauthenticated": bool, ...}, and an unauthenticated
+    hit is always a critical finding: it means full read/write (Redis,
+    Memcached) or full read (Elasticsearch) access to whatever the
+    service holds, with zero credentials."""
+    if not info.get("unauthenticated"):
+        return []
+    extra = f" (cluster_name={info['cluster_name']!r})" if info.get("cluster_name") else ""
+    return [
+        {
+            "type": f"unauthenticated_{service}",
+            "severity": "critical",
+            "description": (
+                f"{service.capitalize()} on {host}:{port} answers requests "
+                f"with no authentication configured{extra} -- anyone who can "
+                "reach this port has full access to whatever it holds"
+            ),
+            "evidence": f"unauthenticated protocol probe to {host}:{port} succeeded",
+            "source": "scanner",
+            "confidence": 1.0,
+        }
+    ]
